@@ -85,3 +85,8 @@ open /Applications/DictationIsland.app --args --state compact|peek|expanded|fini
 
 Parakeet V3 weights: NVIDIA (CC-BY-4.0), Core ML export by FluidInference
 (`FluidInference/parakeet-tdt-0.6b-v3-coreml`). Process-tap setup follows insidegui/AudioCap.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The Parakeet model is downloaded separately and stays under its own
+CC-BY-4.0 license.
