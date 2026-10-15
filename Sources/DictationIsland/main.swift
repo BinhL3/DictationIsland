@@ -20,9 +20,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if AppSettings.shared.speechEngine == .parakeet { ParakeetModels.preload() }
 
         let arguments = CommandLine.arguments
-        let isDemo = arguments.contains("--demo") || arguments.contains("--state")
+        let isDemo = arguments.contains("--demo") || arguments.contains("--state") || arguments.contains("--record")
         if let index = arguments.firstIndex(of: "--state"), index + 1 < arguments.count {
             island.model.pin(arguments[index + 1])
+        } else if let index = arguments.firstIndex(of: "--record"), index + 1 < arguments.count {
+            let text = arguments[index + 1]
+            Task { await island.model.runRecording(text) }
         } else if arguments.contains("--demo") {
             Task { await island.model.runDemo() }
         }

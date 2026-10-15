@@ -492,4 +492,30 @@ final class IslandModel {
             setPhase(.idle)
         }
     }
+
+    /// One scripted dictation that really pastes into the frontmost app, then quits (`--record`).
+    /// For screen recordings: words stream in like a live recognizer, then the text lands.
+    func runRecording(_ text: String) async {
+        simulatesAudio = true
+        let words = text.split(separator: " ")
+        try? await Task.sleep(for: .seconds(1.5))
+        FileHandle.standardError.write("listening \(Date().timeIntervalSince1970)\n".data(using: .utf8)!)
+        start()
+        try? await Task.sleep(for: .seconds(0.9))
+        var shown = 0
+        while shown < words.count {
+            // Recognizers publish in small bursts, not one word at a time.
+            shown = min(words.count, shown + Int.random(in: 1...2))
+            withAnimation(Motion.content) { transcript = words.prefix(shown).joined(separator: " ") }
+            try? await Task.sleep(for: .milliseconds(Int.random(in: 230...380)))
+        }
+        try? await Task.sleep(for: .seconds(0.7))
+        FileHandle.standardError.write("released \(Date().timeIntervalSince1970)\n".data(using: .utf8)!)
+        stop()
+        try? await Task.sleep(for: .seconds(0.8))
+        setPhase(.done(TextInserter.insert(text, autoPaste: true)))
+        scheduleDismiss(after: 1.4)
+        try? await Task.sleep(for: .seconds(4))
+        NSApp.terminate(nil)
+    }
 }
