@@ -1,18 +1,18 @@
 import AppKit
 
-/// A private window-server space with an absolute level, like Alcove's `SpaceManager`.
+/// A private window-server space with an absolute level.
 ///
-/// Window levels only order windows *within* a space. Alcove moves its notch panels into their own
-/// space at absolute level 400 (`CGSSpaceCreate` + `CGSSpaceSetAbsoluteLevel`), which puts them
-/// above every normal window whatever its level, including ours. The island joins a space one
-/// level higher so it covers Alcove's pill instead of the other way round. The same trick keeps it
-/// visible over full-screen apps.
+/// Window levels only order windows *within* a space. A window in its own space at an absolute
+/// level (`CGSSpaceCreate` + `CGSSpaceSetAbsoluteLevel`) sits above every normal window whatever
+/// its level. Notch apps such as Alcove do this at level 400, which would put them above the island;
+/// the island joins a space one level higher so it covers their pill instead of the other way round.
+/// The same trick keeps it visible over full-screen apps.
 ///
 /// The CGS calls are private SkyLight API, looked up at runtime so a missing symbol only means
 /// falling back to the plain window level.
 @MainActor
 final class WindowSpace {
-    /// Alcove uses 400 (`mov w0, #0x190` before `SpaceManager.init`).
+    /// Alcove's notch window sits at level 400; one above it.
     nonisolated static let islandLevel: Int32 = 401
 
     private typealias MainConnectionID = @convention(c) () -> Int32

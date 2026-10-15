@@ -1,14 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// Mirrors Alcove's `NotchShape.Style` (`notch` / `pill`): on screens with a camera housing the
-/// island grows out of the hardware notch; elsewhere it is a floating pill inside the menu bar.
+/// On screens with a camera housing the island grows out of the hardware notch; elsewhere it is a
+/// floating pill inside the menu bar.
 enum IslandStyle {
     case notch
     case pill
 }
 
-/// Screen-derived measurements for one display (Alcove keeps one `NotchController` per display UUID).
+/// Screen-derived measurements for one display.
 struct NotchGeometry: Equatable {
     var style: IslandStyle
     /// Size of the resting island; equals the hardware notch on notched screens.
@@ -17,13 +17,13 @@ struct NotchGeometry: Equatable {
     var topInset: CGFloat
     var screenFrame: CGRect
 
-    /// Alcove's panels are a fixed transparent canvas (624×320 observed at runtime); the island
-    /// morphs inside it, so the window itself never resizes mid-animation.
+    /// The panel is a fixed transparent canvas; the island morphs inside it, so the window itself
+    /// never resizes mid-animation.
     static let canvasSize = CGSize(width: 640, height: 300)
 
     static func forScreen(_ screen: NSScreen, placement: IslandPlacement) -> NotchGeometry {
         let frame = screen.frame
-        // Debug: lay out as if this screen had a 185×32 notch (Alcove's `forceSimulatedNotch`).
+        // Debug: lay out as if this screen had a 185×32 notch.
         if CommandLine.arguments.contains("--simulate-notch") {
             return NotchGeometry(
                 style: .notch,
@@ -86,7 +86,7 @@ struct NotchGeometry: Equatable {
     }
 }
 
-/// Alcove's `NotchShape(style:topCornerRadius:bottomCornerRadius:)`.
+/// The island's outline.
 ///
 /// `.notch`: flat top flush with the screen edge, concave "ears" (topCornerRadius) that blend into
 /// the menu bar, and convex bottom corners. `.pill`: a continuous rounded rectangle.

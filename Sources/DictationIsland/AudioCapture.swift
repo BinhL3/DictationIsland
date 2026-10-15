@@ -2,8 +2,8 @@ import AVFoundation
 import Accelerate
 
 /// Lock-protected bar levels written on the audio thread and read by the waveform's render loop.
-/// Kept outside Observation on purpose: Alcove drives its `NSWaveformView`s from a shared
-/// `WaveformAnimationClock` instead of invalidating SwiftUI on every audio buffer.
+/// Kept outside Observation on purpose: the waveform polls it from its own animation clock
+/// instead of invalidating SwiftUI on every audio buffer.
 final class LevelMeter: @unchecked Sendable {
     let bandCount: Int
     private var levels: [Float]
@@ -31,8 +31,8 @@ final class LevelMeter: @unchecked Sendable {
     }
 }
 
-/// Splits mic audio into log-spaced voice bands, like Alcove's `AudioFrequencyBand(startFrequency:endFrequency:)`
-/// spectrum sessions, but fed from the microphone instead of a process tap.
+/// Splits mic audio into log-spaced voice bands (each a start/end frequency range), one per
+/// waveform bar, so the bars move independently instead of all tracking overall loudness.
 final class SpectrumAnalyzer {
     private let fftSize: Int
     private let log2n: vDSP_Length

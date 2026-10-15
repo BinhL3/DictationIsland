@@ -1,29 +1,26 @@
 import SwiftUI
 
-/// Animation vocabulary recovered from Alcove's binary (see research/alcove/REPORT.md §Motion).
-///
-/// Alcove splits motion in two families:
+/// Shared animation vocabulary, split into two families:
 /// - Shape/geometry morphs use `Spring(duration:bounce:)` with visible bounce (0.3–0.4),
 ///   and an overdamped spring (bounce -0.2) when collapsing.
 /// - Content (labels, icons, opacity) uses critically damped springs
 ///   (`dampingFraction: 1.0`, response 0.2–0.5) plus very short ease-outs (0.1s).
 enum Motion {
-    /// Most common shape spring in Alcove (17 call sites): small widen/HUD morphs.
+    /// Small widen/HUD morphs.
     static let widen = Animation.spring(Spring(duration: 0.35, bounce: 0.3))
-    /// Larger open/expand morphs (Alcove: 0.5/0.375, 0.6/0.35, 0.6/0.4).
+    /// Larger open/expand morphs.
     static let open = Animation.spring(Spring(duration: 0.5, bounce: 0.375))
     /// Collapse: overdamped so the island settles back into the notch without wobble.
     static let close = Animation.spring(Spring(duration: 0.35, bounce: -0.2))
 
-    /// Content swaps: critically damped (Alcove's dominant pair, 61 call sites).
+    /// Content swaps: critically damped so labels and icons never overshoot.
     static let content = Animation.spring(response: 0.2, dampingFraction: 1.0)
     static let contentSlow = Animation.spring(response: 0.4, dampingFraction: 1.0)
-    /// Quick fades (Alcove: easeOut(0.1), 29 call sites).
+    /// Quick fades.
     static let fade = Animation.easeOut(duration: 0.1)
 }
 
-/// Alcove's `SlideBlurScaleModifier` / `DelayedBlurFadeModifier`: content enters by
-/// un-blurring, fading in, and scaling up from slightly smaller.
+/// Content enters by un-blurring, fading in, and scaling up from slightly smaller.
 struct BlurFade: ViewModifier {
     var opacity: Double
     var blur: CGFloat
@@ -59,7 +56,7 @@ extension AnyTransition {
     }
 }
 
-/// Alcove's `ShakeEffect`: horizontal shake for errors.
+/// Horizontal shake for errors.
 struct ShakeEffect: GeometryEffect {
     var position: CGFloat
     var animatableData: CGFloat {

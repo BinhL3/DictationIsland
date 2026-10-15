@@ -73,7 +73,7 @@ struct IslandView: View {
     }
 
     /// Leading wing: status glyph + elapsed time. Trailing wing: waveform. On a notch the middle
-    /// stays empty so nothing sits under the camera (Alcove's left/right content split).
+    /// stays empty so nothing sits under the camera.
     private var header: some View {
         HStack(spacing: 0) {
             leadingWing
@@ -234,7 +234,7 @@ private struct ElapsedTime: View {
 }
 
 /// Single line that keeps the newest words visible. Text starts leading-aligned; once it overflows
-/// it pins to the trailing edge and fades out on the left, like Alcove's `MarqueeText` gradient stops.
+/// it pins to the trailing edge and fades out on the left with a gradient mask.
 struct LiveTranscriptLine: View {
     let text: String
     var isFinishing: Bool

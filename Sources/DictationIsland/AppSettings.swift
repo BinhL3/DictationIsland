@@ -4,7 +4,7 @@ import Observation
 
 /// Where the island lives on screen.
 enum IslandPlacement: String, CaseIterable, Identifiable {
-    /// In the notch / menu bar. If another notch app (Alcove, etc.) is running, the island grows
+    /// In the notch / menu bar. If another notch app (such as Alcove) is running, the island grows
     /// out of the same spot and draws over it while dictating.
     case automatic
     case menuBar
@@ -31,7 +31,7 @@ enum IslandPlacement: String, CaseIterable, Identifiable {
         self == .automatic ? .menuBar : self
     }
 
-    /// Alcove or a similar app already draws a pill in the notch / menu bar.
+    /// A notch app such as Alcove already draws a pill in the notch / menu bar.
     static var notchAppIsRunning: Bool {
         NSWorkspace.shared.runningApplications.contains {
             notchAppBundleIDs.contains($0.bundleIdentifier ?? "")

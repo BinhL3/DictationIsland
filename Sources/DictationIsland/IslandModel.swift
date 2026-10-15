@@ -2,7 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// What the dictation session is doing. Analogous to Alcove's `NotchController.LiveActivity`.
+/// What the dictation session is doing.
 enum DictationPhase: Equatable {
     case idle
     /// Downloading the on-device speech model (first use of a language), 0...1.
@@ -19,18 +19,18 @@ enum InsertResult: Equatable {
     case empty
 }
 
-/// How big the island is. Alcove derives this from flags (`isWidening`, `isQuickPeeking`,
-/// `isExpanded`); here it is one derived value so every view animates off the same key.
+/// How big the island is. One derived value rather than several independent flags, so every
+/// view animates off the same key.
 enum Presentation: Equatable {
     case closed
-    /// Wings either side of the notch: status glyph left, waveform right (Alcove's live activity).
+    /// Wings either side of the notch: status glyph left, waveform right.
     case compact
     /// One centred row with an icon and a short message ("Pasted", errors). Pill style only;
     /// on a notch the message can't sit under the camera, so it uses compact/peek instead.
     case message
-    /// Compact plus one line of live transcript underneath (Alcove's quick peek).
+    /// Compact plus one line of live transcript underneath.
     case peek
-    /// Hovered or erroring: full transcript and controls (Alcove's expanded view).
+    /// Hovered or erroring: full transcript and controls.
     case expanded
 }
 
@@ -215,7 +215,7 @@ final class IslandModel {
         }
     }
 
-    /// Shape morphs use bouncy springs; collapses use the overdamped one (Alcove pattern).
+    /// Shape morphs use bouncy springs; collapses use the overdamped one so they settle cleanly.
     var shapeAnimation: Animation {
         switch presentation {
         case .closed: return Motion.close

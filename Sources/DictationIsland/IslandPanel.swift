@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// Borderless, non-activating panel that floats over the menu bar on every Space.
-/// Alcove's `NotchPanel` sits at `CGShieldingWindowLevel() + 1` inside a level-400 `WindowSpace`;
-/// the island goes one higher on both so it grows out of the notch *over* Alcove's pill while
-/// dictating. Idle, it steps back below Alcove (see `IslandWindowController.updateLayering`).
+/// It sits at `CGShieldingWindowLevel() + 2` and inside a level-401 `WindowSpace`, above notch apps
+/// such as Alcove, so it grows out of the notch *over* their pill while dictating. Idle, it steps
+/// back below them (see `IslandWindowController.updateLayering`).
 final class IslandPanel: NSPanel {
     init(frame: CGRect) {
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -25,14 +25,14 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Alcove's `NSHostingViewSuppressingSafeArea`: on notched screens the top of the window overlaps
-/// the camera housing, and SwiftUI would otherwise inset content below it.
+/// Hosting view with no safe area: on notched screens the top of the window overlaps the camera
+/// housing, and SwiftUI would otherwise inset content below it.
 final class SafeAreaFreeHostingView<Content: View>: NSHostingView<Content> {
     override var safeAreaInsets: NSEdgeInsets { NSEdgeInsets() }
 }
 
-/// Owns the panel for one screen and does what Alcove's `NotchController` does with its
-/// tracking areas and global mouse monitors: hover detection plus click-through outside the island.
+/// Owns the panel for one screen and uses global mouse monitors for hover detection plus
+/// click-through outside the island.
 @MainActor
 final class IslandWindowController {
     let model: IslandModel
@@ -155,7 +155,7 @@ final class IslandWindowController {
         // Outside the island the canvas is click-through, so the menu bar below stays usable.
         panel.ignoresMouseEvents = !inside
 
-        // Small dwell before expanding, like Alcove's `hoverDuration`; leaving is immediate.
+        // Small dwell before expanding so passing the cursor over doesn't open it; leaving is immediate.
         hoverTask?.cancel()
         if inside, !model.isHovering, model.phase != .idle {
             hoverTask = Task { [weak self] in
@@ -170,7 +170,7 @@ final class IslandWindowController {
 }
 
 extension NSScreen {
-    /// Prefer the built-in notched display, like Alcove's default `showOnDisplay` behaviour.
+    /// Prefer the built-in notched display, falling back to the main screen.
     static var preferredIslandScreen: NSScreen? {
         screens.first { $0.safeAreaInsets.top > 0 } ?? main ?? screens.first
     }

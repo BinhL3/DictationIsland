@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Bar waveform modelled on Alcove's `NSWaveformView`: a fixed number of rounded bars, a shared
-/// animation clock, and two sources: `live` (spectrum bands) and `simulated` (synthesized motion).
+/// Bar waveform: a fixed number of rounded bars, a shared animation clock, and two sources: `live`
+/// (spectrum bands) and `simulated` (synthesized motion).
 /// `suspended` holds a low resting line while transcription finishes.
 struct WaveformView: View {
     enum Source {
@@ -92,7 +92,7 @@ struct RecordingDot: View {
     }
 }
 
-/// Moving highlight across text while the final transcript resolves (Alcove links `Shimmer`).
+/// Moving highlight across text while the final transcript resolves.
 struct ShimmerModifier: ViewModifier {
     var isActive: Bool
     @State private var phase: CGFloat = -1
