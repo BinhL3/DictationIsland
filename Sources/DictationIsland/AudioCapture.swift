@@ -124,7 +124,12 @@ final class AudioCapture {
     ///   - deviceUID: Core Audio UID of the input to open; nil uses the system default.
     ///   - channel: which input channel(s) to keep.
     func start(deviceUID: String?, channel: InputChannel, onBuffer: @escaping (AVAudioPCMBuffer) -> Void) throws {
+        try start(deviceUID: deviceUID, channel: channel, onBuffer: onBuffer, isRebuild: false)
+    }
+
+    private func start(deviceUID: String?, channel: InputChannel, onBuffer: @escaping (AVAudioPCMBuffer) -> Void, isRebuild: Bool) throws {
         stopObservingConfiguration()
+        if !isRebuild { rebuilds = 0 }
         // A fresh engine per session picks up device changes (plugging in a mic, switching inputs).
         engine = AVAudioEngine()
         let input = engine.inputNode
@@ -163,13 +168,17 @@ final class AudioCapture {
         engine.prepare()
         try engine.start()
 
-        // Any change to the system's audio setup (a Bluetooth headset switching profile, a device
-        // appearing, the muffle's tap) stops the engine. Rebuild it so the session keeps hearing you.
+        // A change to the system's audio setup (a Bluetooth headset switching profile, a device
+        // appearing) can stop the engine; rebuild it so the session keeps hearing you. The
+        // notification also fires spuriously, e.g. when the previous session's engine releases the
+        // same mic, so only act if the engine really stopped. Rebuilding on a spurious one loops:
+        // each rebuild releases an engine, which posts another (the menu bar mic icon flickers).
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            try? self.start(deviceUID: deviceUID, channel: channel, onBuffer: onBuffer)
+            guard let self, !self.engine.isRunning, self.rebuilds < Self.maxRebuilds else { return }
+            self.rebuilds += 1
+            try? self.start(deviceUID: deviceUID, channel: channel, onBuffer: onBuffer, isRebuild: true)
         }
     }
 
@@ -179,6 +188,10 @@ final class AudioCapture {
     }
 
     private var configurationObserver: NSObjectProtocol?
+    /// Rebuilds after real configuration changes this session; capped so a device that keeps
+    /// stopping can't turn into a loop.
+    private var rebuilds = 0
+    private static let maxRebuilds = 3
 
     private func stopObservingConfiguration() {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
