@@ -39,8 +39,10 @@ final class SpectrumAnalyzer {
     private let setup: FFTSetup
     private var window: [Float]
     private let bands: [(start: Float, end: Float)]
+    /// Each band's recent peak energy, decaying between buffers. Audio thread only.
+    private var bandPeaks: [Float]
 
-    init(bandCount: Int, fftSize: Int = 1024, minFrequency: Float = 90, maxFrequency: Float = 5_000) {
+    init(bandCount: Int, fftSize: Int = 1024, minFrequency: Float = 120, maxFrequency: Float = 6_000) {
         self.fftSize = fftSize
         self.log2n = vDSP_Length(log2(Float(fftSize)))
         self.setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
@@ -50,6 +52,7 @@ final class SpectrumAnalyzer {
         self.bands = (0..<bandCount).map { i in
             (minFrequency * pow(ratio, Float(i)), minFrequency * pow(ratio, Float(i + 1)))
         }
+        self.bandPeaks = Array(repeating: 1e-12, count: bandCount)
     }
 
     deinit {
@@ -58,6 +61,10 @@ final class SpectrumAnalyzer {
 
     /// Returns one 0...1 level per band. Overall height follows loudness (dBFS), the per-bar
     /// shape follows the spectrum, so silence stays flat regardless of FFT scaling.
+    ///
+    /// Voice energy sits mostly below 500 Hz and falls off ~6 dB per octave, so raw band energy
+    /// keeps the low (left) bars tall and the rest near their floor. Bands are tilted +6 dB per
+    /// octave and judged mostly against their own recent peak, so every bar moves while talking.
     func levels(samples: UnsafePointer<Float>, count: Int, sampleRate: Double) -> [Float] {
         let n = min(count, fftSize)
         var rms: Float = 0
@@ -91,10 +98,19 @@ final class SpectrumAnalyzer {
             let hi = min(half - 1, max(lo + 1, Int(band.end / binWidth)))
             var sum: Float = 0
             vDSP_sve(Array(magnitudes[lo..<hi]), 1, &sum, vDSP_Length(hi - lo))
-            return sum / Float(hi - lo)
+            let tilt = sqrt(band.start * band.end) / 250
+            return sum / Float(hi - lo) * tilt * tilt
         }
         let peak = max(energies.max() ?? 0, 1e-12)
-        return energies.map { loudness * (0.35 + 0.65 * sqrt($0 / peak)) }
+        // 0 at 24 dB below the reference, 1 at it.
+        func scaled(_ energy: Float, _ reference: Float) -> Float {
+            1 + 10 * log10(max(energy / reference, 1e-12)) / 24
+        }
+        return energies.indices.map { i in
+            bandPeaks[i] = max(energies[i], bandPeaks[i] * 0.9)
+            let shape = 0.8 * scaled(energies[i], bandPeaks[i]) + 0.2 * scaled(energies[i], peak)
+            return loudness * (0.35 + 0.65 * max(0, shape))
+        }
     }
 }
 
