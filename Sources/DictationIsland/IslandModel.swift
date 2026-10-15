@@ -316,6 +316,18 @@ final class IslandModel {
         }
     }
 
+    /// Gets the next dictation ready to start quickly: builds the mic engine for the current input
+    /// (without opening the mic) and warms up the speech model lookup. Cheap to call again.
+    func prepare() {
+        guard !simulatesAudio else { return }
+        audio.prepare(deviceUID: settings.microphoneUID, channel: settings.inputChannel)
+        let engine = settings.speechEngine, locale = settings.locale
+        Task.detached(priority: .utility) {
+            let resolution = await SpeechModelCatalog.resolve(engine, locale: locale)
+            _ = await SpeechModelCatalog.status(of: resolution)
+        }
+    }
+
     func cancel() {
         if !simulatesAudio {
             audio.stop()

@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installPushToTalk(model: island.model)
         updateHotKey(model: island.model)
         observeShortcutSettings(model: island.model)
+        if !isDemo { observeAudioSettings(model: island.model) }
         installStatusItem()
 
         if arguments.contains("--settings") || (!isDemo && Permission.allCases.contains { $0.isRequired && !$0.isGranted }) {
@@ -73,6 +74,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pushToTalkRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 if self?.pushToTalk.start() == true { timer.invalidate() }
+            }
+        }
+    }
+
+    /// Keeps the next dictation's mic and speech model ready for the current settings.
+    private func observeAudioSettings(model: IslandModel) {
+        model.prepare()
+        withObservationTracking {
+            _ = settings.microphoneUID
+            _ = settings.inputChannel
+            _ = settings.speechEngine
+            _ = settings.locale
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.observeAudioSettings(model: model) }
             }
         }
     }

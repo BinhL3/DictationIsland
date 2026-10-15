@@ -100,10 +100,24 @@ final class SpectrumAnalyzer {
 
 /// Owns the microphone. Every buffer is downmixed to mono, then fanned out to the level meter
 /// and the transcriber, so stereo USB mics (Blue Yeti: 2 channels) behave like any other input.
+///
+/// Building the engine graph takes ~170 ms (more on first use); starting a built one ~60 ms.
+/// So the graph is built ahead of time with `prepare` and kept across sessions: a prepared,
+/// stopped engine doesn't open the mic (no menu bar indicator), and pressing the key only has
+/// to start it. Reusing one engine also avoids the spurious configuration-change notifications
+/// that releasing an engine sends to the next one.
 final class AudioCapture {
-    private var engine = AVAudioEngine()
-    /// Silent node the input is connected to, so the input bus adopts the device's real format.
-    private var sink: AVAudioMixerNode?
+    /// A built, prepared engine for one input and channel choice.
+    private struct Graph {
+        let engine: AVAudioEngine
+        let deviceUID: String?
+        let channel: InputChannel
+        let deviceID: AudioDeviceID?
+        let hardware: AVAudioFormat
+    }
+
+    private var graph: Graph?
+    private let handler = BufferHandler()
     private let analyzer: SpectrumAnalyzer
     private let meter: LevelMeter
 
@@ -120,18 +134,98 @@ final class AudioCapture {
         }
     }
 
+    /// Builds the engine for this input now so a later `start` is quick. No-op without mic
+    /// permission, while running, or if it's already built for these settings.
+    func prepare(deviceUID: String?, channel: InputChannel) {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+              !(graph?.engine.isRunning ?? false) else { return }
+        _ = try? reusableGraph(deviceUID: deviceUID, channel: channel)
+    }
+
     /// - Parameters:
     ///   - deviceUID: Core Audio UID of the input to open; nil uses the system default.
     ///   - channel: which input channel(s) to keep.
     func start(deviceUID: String?, channel: InputChannel, onBuffer: @escaping (AVAudioPCMBuffer) -> Void) throws {
-        try start(deviceUID: deviceUID, channel: channel, onBuffer: onBuffer, isRebuild: false)
+        stopObserving()
+        rebuilds = 0
+        handler.set(onBuffer)
+        do {
+            try reusableGraph(deviceUID: deviceUID, channel: channel).engine.start()
+        } catch {
+            // The prepared engine went stale in a way the checks missed; build a fresh one.
+            graph = nil
+            try buildGraph(deviceUID: deviceUID, channel: channel).engine.start()
+        }
+        observeConfiguration(deviceUID: deviceUID, channel: channel)
     }
 
-    private func start(deviceUID: String?, channel: InputChannel, onBuffer: @escaping (AVAudioPCMBuffer) -> Void, isRebuild: Bool) throws {
-        stopObservingConfiguration()
-        if !isRebuild { rebuilds = 0 }
-        // A fresh engine per session picks up device changes (plugging in a mic, switching inputs).
-        engine = AVAudioEngine()
+    func stop() {
+        stopObserving()
+        handler.set(nil)
+        graph?.engine.stop()
+        meter.reset()
+    }
+
+    private var configurationObserver: NSObjectProtocol?
+    /// Rebuilds after real configuration changes this session; capped so a device that keeps
+    /// stopping can't turn into a loop.
+    private var rebuilds = 0
+    private static let maxRebuilds = 3
+
+    /// A change to the system's audio setup (a Bluetooth headset switching profile, a device
+    /// appearing) can stop the engine; rebuild it so the session keeps hearing you. The
+    /// notification also fires spuriously while the engine keeps running, so only act if it
+    /// really stopped. Rebuilding on a spurious one loops: each rebuild releases an engine, which
+    /// posts another (the menu bar mic icon flickers).
+    private func observeConfiguration(deviceUID: String?, channel: InputChannel) {
+        guard let engine = graph?.engine else { return }
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            guard let self, let graph = self.graph, !graph.engine.isRunning,
+                  self.rebuilds < Self.maxRebuilds else { return }
+            self.rebuilds += 1
+            self.stopObserving()
+            self.graph = nil
+            guard (try? self.buildGraph(deviceUID: deviceUID, channel: channel).engine.start()) != nil else { return }
+            self.observeConfiguration(deviceUID: deviceUID, channel: channel)
+        }
+    }
+
+    private func stopObserving() {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        configurationObserver = nil
+    }
+
+    /// The prepared graph if it still matches the settings and the hardware, else a new one.
+    private func reusableGraph(deviceUID: String?, channel: InputChannel) throws -> Graph {
+        if let graph, graph.deviceUID == deviceUID, graph.channel == channel,
+           graph.deviceID == Self.deviceID(uid: deviceUID) {
+            let current = graph.engine.inputNode.inputFormat(forBus: 0)
+            if current.sampleRate == graph.hardware.sampleRate, current.channelCount == graph.hardware.channelCount {
+                return graph
+            }
+        }
+        graph = nil
+        return try buildGraph(deviceUID: deviceUID, channel: channel)
+    }
+
+    /// The device a graph for `uid` opens: that device if present, else the system default input.
+    private static func deviceID(uid: String?) -> AudioDeviceID? {
+        if let uid, let device = AudioDevices.device(uid: uid) { return device.id }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var id: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
+        return status == noErr ? id : nil
+    }
+
+    private func buildGraph(deviceUID: String?, channel: InputChannel) throws -> Graph {
+        let engine = AVAudioEngine()
         let input = engine.inputNode
         if let deviceUID, let device = AudioDevices.device(uid: deviceUID) {
             try select(device: device.id, on: input)
@@ -144,19 +238,20 @@ final class AudioCapture {
         guard hardware.channelCount > 0, hardware.sampleRate > 0,
               let busFormat = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate, channels: hardware.channelCount)
         else { throw AudioCaptureError.noInput }
+        // Silent node the input is connected to, so the input bus adopts the device's real format.
         let sink = AVAudioMixerNode()
         engine.attach(sink)
         engine.connect(input, to: sink, format: busFormat)
         sink.outputVolume = 0
-        self.sink = sink
 
         let format = input.outputFormat(forBus: 0)
         guard let mono = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1) else {
             throw AudioCaptureError.noInput
         }
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [analyzer, meter] buffer, _ in
-            guard let monoBuffer = Self.downmix(buffer, to: mono, channel: channel) else { return }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [analyzer, meter, handler] buffer, _ in
+            guard let onBuffer = handler.get(),
+                  let monoBuffer = Self.downmix(buffer, to: mono, channel: channel) else { return }
             onBuffer(monoBuffer)
             let levels = analyzer.levels(
                 samples: monoBuffer.floatChannelData![0],
@@ -166,40 +261,12 @@ final class AudioCapture {
             meter.write(levels)
         }
         engine.prepare()
-        try engine.start()
-
-        // A change to the system's audio setup (a Bluetooth headset switching profile, a device
-        // appearing) can stop the engine; rebuild it so the session keeps hearing you. The
-        // notification also fires spuriously, e.g. when the previous session's engine releases the
-        // same mic, so only act if the engine really stopped. Rebuilding on a spurious one loops:
-        // each rebuild releases an engine, which posts another (the menu bar mic icon flickers).
-        configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            guard let self, !self.engine.isRunning, self.rebuilds < Self.maxRebuilds else { return }
-            self.rebuilds += 1
-            try? self.start(deviceUID: deviceUID, channel: channel, onBuffer: onBuffer, isRebuild: true)
-        }
-    }
-
-    func stop() {
-        stopObservingConfiguration()
-        meter.reset()
-    }
-
-    private var configurationObserver: NSObjectProtocol?
-    /// Rebuilds after real configuration changes this session; capped so a device that keeps
-    /// stopping can't turn into a loop.
-    private var rebuilds = 0
-    private static let maxRebuilds = 3
-
-    private func stopObservingConfiguration() {
-        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
-        configurationObserver = nil
-        // Touching `inputNode` on an unused engine would open the default input (e.g. AirPods).
-        guard engine.isRunning else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        let graph = Graph(
+            engine: engine, deviceUID: deviceUID, channel: channel,
+            deviceID: Self.deviceID(uid: deviceUID), hardware: hardware
+        )
+        self.graph = graph
+        return graph
     }
 
     private func select(device: AudioDeviceID, on input: AVAudioInputNode) throws {
@@ -239,6 +306,24 @@ final class AudioCapture {
             vDSP_vsmul(destination, 1, &scale, destination, 1, frames)
         }
         return output
+    }
+}
+
+/// The current session's buffer consumer, swapped from the main thread and read on the tap's.
+private final class BufferHandler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+
+    func set(_ onBuffer: ((AVAudioPCMBuffer) -> Void)?) {
+        lock.lock()
+        self.onBuffer = onBuffer
+        lock.unlock()
+    }
+
+    func get() -> ((AVAudioPCMBuffer) -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return onBuffer
     }
 }
 
