@@ -59,6 +59,14 @@ final class IslandModel {
     /// Resolves once the transcriber is ready; `stop()` waits on it so a quick tap can't race setup.
     @ObservationIgnored private var sessionSetup: Task<Bool, Never>?
     @ObservationIgnored private var dismissTask: Task<Void, Never>?
+    /// Bumped whenever a session ends, so setup still in flight for it gives up.
+    @ObservationIgnored private var generation = 0
+    /// A session is being set up or is capturing (the phase may still be idle while armed).
+    @ObservationIgnored private var isCapturing = false
+    /// The mic is running for the current session.
+    @ObservationIgnored private var isCaptureRunning = false
+    /// Capturing on key-down but not shown yet; see `arm()`.
+    @ObservationIgnored private(set) var isArmed = false
     /// Engine actually used for the current/last session, for display.
     private(set) var activeEngine: SpeechEngine?
 
@@ -231,29 +239,73 @@ final class IslandModel {
         }
     }
 
+    /// Starts listening without showing anything, as soon as a trigger key goes down, so the mic is
+    /// already running by the time the press counts as a hold (~200 ms later). `start()` reveals
+    /// the session; `disarm()` drops it if the press turned out to be a shortcut. Nothing is shown
+    /// and media isn't muffled until then; only the system mic indicator flashes.
+    func arm() {
+        switch phase {
+        case .idle, .done, .error: break
+        default: return
+        }
+        guard !simulatesAudio, !isCapturing else { return }
+        isArmed = true
+        beginSession()
+    }
+
+    /// The armed press became a shortcut: stop the hidden session.
+    func disarm() {
+        guard isArmed else { return }
+        isArmed = false
+        endCapture()
+    }
+
     func start() {
+        if isArmed {
+            isArmed = false
+            dismissTask?.cancel()
+            // Still setting up: `beginSession` shows the island once the mic is running.
+            if isCaptureRunning { setPhase(.listening) }
+            return
+        }
         switch phase {
         case .listening, .finishing, .preparing: return
         default: break
         }
+        guard !isCapturing else { return }
         dismissTask?.cancel()
-        transcript = ""
         if simulatesAudio {
+            transcript = ""
             setPhase(.listening)
             return
         }
+        beginSession()
+    }
+
+    private func beginSession() {
+        generation += 1
+        let session = generation
+        isCapturing = true
+        isCaptureRunning = false
+        transcript = ""
         Task {
+            // Each await can outlive the session (a disarm or cancel meanwhile).
+            @MainActor func current() -> Bool { session == generation }
             guard await AudioCapture.requestPermission() else {
-                return fail("Microphone access denied")
+                return failSession(session, "Microphone access denied")
             }
             let resolution = await SpeechModelCatalog.resolve(settings.speechEngine, locale: settings.locale)
             let transcriber = makeTranscriber(for: resolution)
             guard await transcriber.requestPermission() else {
-                return fail("Speech recognition denied")
+                return failSession(session, "Speech recognition denied")
             }
+            guard current() else { return }
 
-            // First use of a language: fetch the on-device model before listening.
+            // First use of a language: fetch the on-device model before listening. This needs the
+            // island, so an armed press reveals itself.
             if await SpeechModelCatalog.status(of: resolution) == .downloadable {
+                guard current() else { return }
+                isArmed = false
                 setPhase(.preparing(0))
                 do {
                     try await SpeechModelCatalog.install(resolution) { fraction in
@@ -263,10 +315,11 @@ final class IslandModel {
                         }
                     }
                 } catch {
-                    return fail("Couldn't download the speech model")
+                    return failSession(session, "Couldn't download the speech model")
                 }
-                guard case .preparing = phase else { return }  // cancelled meanwhile
+                guard current(), case .preparing = phase else { return }  // cancelled meanwhile
             }
+            guard current() else { return }
 
             // Capture starts immediately; audio is held by the gate until the model is ready,
             // so the first words aren't lost while SpeechAnalyzer spins up.
@@ -279,9 +332,10 @@ final class IslandModel {
                     gate.push(buffer)
                 }
             } catch {
-                return fail(error.localizedDescription)
+                return failSession(session, error.localizedDescription)
             }
-            setPhase(.listening)
+            isCaptureRunning = true
+            if !isArmed { setPhase(.listening) }
 
             let setup = Task { @MainActor [weak self] () -> Bool in
                 do {
@@ -289,9 +343,7 @@ final class IslandModel {
                     gate.open(into: transcriber)
                     return true
                 } catch {
-                    self?.audio.stop()
-                    transcriber.cancel()
-                    self?.fail(error.localizedDescription)
+                    self?.failSession(session, error.localizedDescription)
                     return false
                 }
             }
@@ -304,10 +356,14 @@ final class IslandModel {
         setPhase(.finishing)
         if simulatesAudio { return }
         audio.stop()
+        isCaptureRunning = false
+        let session = generation
         Task {
-            guard await sessionSetup?.value == true, let transcriber else { return }
+            guard await sessionSetup?.value == true, let transcriber, session == generation else { return }
             let text = await transcriber.finish()
+            guard session == generation else { return }
             self.transcriber = nil
+            isCapturing = false
             transcript = text
             settings.record(text)
             let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
@@ -329,13 +385,27 @@ final class IslandModel {
     }
 
     func cancel() {
-        if !simulatesAudio {
-            audio.stop()
-            transcriber?.cancel()
-            transcriber = nil
-        }
+        isArmed = false
+        if !simulatesAudio { endCapture() }
         transcript = ""
         setPhase(.idle)
+    }
+
+    /// Stops the mic and abandons the current session, including one still being set up.
+    private func endCapture() {
+        generation += 1
+        isCapturing = false
+        isCaptureRunning = false
+        audio.stop()
+        transcriber?.cancel()
+        transcriber = nil
+    }
+
+    private func failSession(_ session: Int, _ message: String) {
+        guard session == generation else { return }
+        isArmed = false
+        endCapture()
+        fail(message)
     }
 
     private func makeTranscriber(for resolution: SpeechModelCatalog.Resolution) -> Transcriber {

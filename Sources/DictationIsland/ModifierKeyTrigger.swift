@@ -53,6 +53,10 @@ struct TriggerKey: Codable, Hashable, Identifiable {
 ///
 /// Needs Input Monitoring permission; listen-only taps can't block or alter events.
 final class ModifierKeyTrigger {
+    /// The key went down on its own. It may still become a hold, a tap, or a shortcut chord.
+    var onPress: (() -> Void)?
+    /// Became a shortcut chord (or was dropped) before the hold started.
+    var onChordBeforeHold: (() -> Void)?
     /// Held past `holdThreshold`: hold-to-talk begins.
     var onHoldStart: (() -> Void)?
     /// Released after a hold.
@@ -131,6 +135,7 @@ final class ModifierKeyTrigger {
     }
 
     private func reset() {
+        if downKey != nil, !isHolding, !isChorded { onChordBeforeHold?() }
         holdWork?.cancel()
         downKey = nil
         isHolding = false
@@ -149,6 +154,7 @@ final class ModifierKeyTrigger {
         }
         holdWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdThreshold, execute: work)
+        onPress?()
     }
 
     private func released(_ key: TriggerKey) {
@@ -167,6 +173,8 @@ final class ModifierKeyTrigger {
         if isHolding {
             isHolding = false
             onChordAfterHold?()
+        } else {
+            onChordBeforeHold?()
         }
     }
 }

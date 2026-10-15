@@ -4,7 +4,7 @@ import SwiftUI
 /// Borderless, non-activating panel that floats over the menu bar on every Space.
 /// Alcove's `NotchPanel` sits at `CGShieldingWindowLevel() + 1` inside a level-400 `WindowSpace`;
 /// the island goes one higher on both so it grows out of the notch *over* Alcove's pill while
-/// dictating. Idle, the panel is fully transparent and click-through, so Alcove stays usable.
+/// dictating. Idle, it steps back below Alcove (see `IslandWindowController.updateLayering`).
 final class IslandPanel: NSPanel {
     init(frame: CGRect) {
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -40,6 +40,10 @@ final class IslandWindowController {
     private let space = WindowSpace()
     private var monitors: [Any] = []
     private var hoverTask: Task<Void, Never>?
+    private var lowerTask: Task<Void, Never>?
+    /// Cached from `relayout`, which reruns when a notch app launches or quits; checking running
+    /// apps on every mouse move would be wasteful.
+    private var notchAppRunning = IslandPlacement.notchAppIsRunning
 
     init(screen: NSScreen) {
         let geometry = NotchGeometry.forScreen(screen, placement: AppSettings.shared.placement.resolved)
@@ -80,6 +84,36 @@ final class IslandWindowController {
         }
         relayout()
         observeSettings()
+        observePhase()
+    }
+
+    private func observePhase() {
+        withObservationTracking {
+            _ = model.phase
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.updateLayering()
+                    self?.observePhase()
+                }
+            }
+        }
+    }
+
+    /// While dictating, the island sits in its own window-server space above notch apps like
+    /// Alcove. Idle, if one is running, it leaves that space so it falls below the app's window
+    /// and the app keeps its hover and clicks. Leaving waits for the collapse animation to finish.
+    private func updateLayering() {
+        lowerTask?.cancel()
+        guard model.phase == .idle, notchAppRunning else {
+            space?.add(panel)
+            return
+        }
+        lowerTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            guard let self, !Task.isCancelled, self.model.phase == .idle else { return }
+            self.space?.remove(self.panel)
+        }
     }
 
     private func observeSettings() {
@@ -101,6 +135,8 @@ final class IslandWindowController {
         let settings = AppSettings.shared
         let placement = settings.placement.resolved
         let geometry = NotchGeometry.forScreen(screen, placement: placement)
+        notchAppRunning = IslandPlacement.notchAppIsRunning
+        updateLayering()
         model.updateGeometry(geometry)
         // On a notch the resting island is the black camera housing itself, so it's always "shown".
         // In the menu bar, a running notch app already draws its own resting pill in the same spot.
@@ -112,7 +148,9 @@ final class IslandWindowController {
     private func updateHover() {
         let mouse = NSEvent.mouseLocation
         let rect = model.geometry.islandScreenRect(size: model.islandSize).insetBy(dx: -6, dy: -6)
-        let inside = rect.contains(mouse) && (model.phase != .idle || model.showsIdleIsland)
+        // Idle, a notch app owns the notch: its hover and clicks must reach it, not us.
+        let inside = rect.contains(mouse)
+            && (model.phase != .idle || (model.showsIdleIsland && !notchAppRunning))
 
         // Outside the island the canvas is click-through, so the menu bar below stays usable.
         panel.ignoresMouseEvents = !inside

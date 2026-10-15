@@ -47,10 +47,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Primary trigger. Hold the push-to-talk key to talk and release to finish; tap it alone to
     /// start hands-free mode, tap again to finish. Using it in a shortcut or to type a character is ignored.
     private func installPushToTalk(model: IslandModel) {
+        // The mic starts on key-down, hidden, so the first words aren't lost to the hold delay.
+        pushToTalk.onPress = { MainActor.assumeIsolated { model.arm() } }
+        pushToTalk.onChordBeforeHold = { MainActor.assumeIsolated { model.disarm() } }
         pushToTalk.onTap = { model.toggle() }
         pushToTalk.onHoldStart = { [weak self] in
             MainActor.assumeIsolated {
-                self?.holdStartedSession = model.phase != .listening
+                self?.holdStartedSession = model.phase != .listening || model.isArmed
                 model.start()
             }
         }
