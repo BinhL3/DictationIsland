@@ -39,7 +39,6 @@ final class IslandWindowController {
     private let panel: IslandPanel
     private let space = WindowSpace()
     private var monitors: [Any] = []
-    private var hoverTask: Task<Void, Never>?
     private var lowerTask: Task<Void, Never>?
     /// Cached from `relayout`, which reruns when a notch app launches or quits; checking running
     /// apps on every mouse move would be wasteful.
@@ -85,6 +84,26 @@ final class IslandWindowController {
         relayout()
         observeSettings()
         observePhase()
+        observeInAppPreview()
+    }
+
+    /// While Home shows the live island, the notch copy fades out (and stops taking the mouse).
+    private func observeInAppPreview() {
+        withObservationTracking {
+            _ = AppStatus.shared.islandShownInApp
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.2
+                        self.panel.animator().alphaValue = AppStatus.shared.islandShownInApp ? 0 : 1
+                    }
+                    self.updateHover()
+                    self.observeInAppPreview()
+                }
+            }
+        }
     }
 
     private func observePhase() {
@@ -149,23 +168,15 @@ final class IslandWindowController {
         let mouse = NSEvent.mouseLocation
         let rect = model.geometry.islandScreenRect(size: model.islandSize).insetBy(dx: -6, dy: -6)
         // Idle, a notch app owns the notch: its hover and clicks must reach it, not us.
-        let inside = rect.contains(mouse)
+        let inside = rect.contains(mouse) && !AppStatus.shared.islandShownInApp
             && (model.phase != .idle || (model.showsIdleIsland && !notchAppRunning))
 
         // Outside the island the canvas is click-through, so the menu bar below stays usable.
         panel.ignoresMouseEvents = !inside
 
-        // Small dwell before expanding so passing the cursor over doesn't open it; leaving is immediate.
-        hoverTask?.cancel()
-        if inside, !model.isHovering, model.phase != .idle {
-            hoverTask = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(180))
-                guard !Task.isCancelled else { return }
-                self?.model.isHovering = true
-            }
-        } else if !inside, model.isHovering {
-            model.isHovering = false
-        }
+        // No dwell: entering and leaving both react on the next mouse move, like Alcove.
+        let hovering = inside && model.phase != .idle
+        if hovering != model.isHovering { model.isHovering = hovering }
     }
 }
 

@@ -7,11 +7,13 @@ import SwiftUI
 ///   (`dampingFraction: 1.0`, response 0.2–0.5) plus very short ease-outs (0.1s).
 enum Motion {
     /// Small widen/HUD morphs.
-    static let widen = Animation.spring(Spring(duration: 0.35, bounce: 0.3))
+    static let widen = Animation.spring(Spring(duration: 0.28, bounce: 0.3))
     /// Larger open/expand morphs.
-    static let open = Animation.spring(Spring(duration: 0.5, bounce: 0.375))
+    static let open = Animation.spring(Spring(duration: 0.4, bounce: 0.375))
+    /// Hover expand/collapse: tracks the cursor, so it must respond faster than `open`.
+    static let hover = Animation.spring(Spring(duration: 0.26, bounce: 0.2))
     /// Collapse: overdamped so the island settles back into the notch without wobble.
-    static let close = Animation.spring(Spring(duration: 0.35, bounce: -0.2))
+    static let close = Animation.spring(Spring(duration: 0.28, bounce: -0.2))
 
     /// Content swaps: critically damped so labels and icons never overshoot.
     static let content = Animation.spring(response: 0.2, dampingFraction: 1.0)

@@ -42,7 +42,11 @@ final class IslandModel {
     /// Drives the elapsed timer; `listeningEndedAt` freezes it while transcribing.
     private(set) var listeningStartedAt: Date?
     private(set) var listeningEndedAt: Date?
-    var isHovering = false
+    var isHovering = false {
+        didSet { if isHovering != oldValue { hoverChangedAt = Date() } }
+    }
+    /// Lets `shapeAnimation` give hover morphs a snappier spring than state-driven ones.
+    @ObservationIgnored private var hoverChangedAt = Date.distantPast
     private(set) var geometry: NotchGeometry
     /// Bumped to replay the error shake.
     private(set) var shakeTrigger: CGFloat = 0
@@ -54,13 +58,33 @@ final class IslandModel {
     @ObservationIgnored let meter = LevelMeter(bandCount: 6)
     @ObservationIgnored var simulatesAudio = false
     @ObservationIgnored private lazy var audio = AudioCapture(meter: meter)
+    /// The take being captured. `stop()` hands it off to `outputChain`, so the next press can
+    /// start a new one while it finishes.
     @ObservationIgnored private var transcriber: Transcriber?
     @ObservationIgnored private var gate: AudioGate?
-    /// Resolves once the transcriber is ready; `stop()` waits on it so a quick tap can't race setup.
+    /// Resolves once the transcriber is ready; finishing waits on it so a quick tap can't race setup.
     @ObservationIgnored private var sessionSetup: Task<Bool, Never>?
     @ObservationIgnored private var dismissTask: Task<Void, Never>?
-    /// Bumped whenever a session ends, so setup still in flight for it gives up.
+    /// The current take's id. Bumped for every new take and whenever one is abandoned, so setup
+    /// still in flight for it gives up.
     @ObservationIgnored private var generation = 0
+    /// The take whose transcript and result the island shows. Lags `generation` while a take
+    /// is armed but hidden, and while an earlier take finishes behind a newer one.
+    @ObservationIgnored private var shownTake = 0
+    /// Latest live text of the current take, shown when an armed take is revealed.
+    @ObservationIgnored private var activePartial = ""
+    /// Finished takes paste in the order they were spoken: each job waits for the one before.
+    @ObservationIgnored private var outputChain: Task<Void, Never>?
+    /// Finishing takes the user cancelled; their text is dropped instead of pasted.
+    @ObservationIgnored private var cancelledTakes: Set<Int> = []
+    /// The mic stays open this long after release, because a release often lands while the last
+    /// word is still sounding (Hex measured clipped final words without it).
+    static let releaseTail: Duration = .milliseconds(200)
+    @ObservationIgnored private var tail: Task<Void, Never>?
+    /// The take the tail is still recording for.
+    @ObservationIgnored private var tailTake: Int?
+    /// Safety net for any engine whose final result never arrives; the last live text is used.
+    static let finishDeadline: Duration = .seconds(15)
     /// A session is being set up or is capturing (the phase may still be idle while armed).
     @ObservationIgnored private var isCapturing = false
     /// The mic is running for the current session.
@@ -115,7 +139,6 @@ final class IslandModel {
         static let glyphSpacing: CGFloat = 6
         static let timerWidth: CGFloat = 32
         static let waveformWidth: CGFloat = 31
-        static let pillHeaderHeight: CGFloat = 32
         static let wingGap: CGFloat = 20
         static let transcriptLineHeight: CGFloat = 20
         static let rowBottomPadding: CGFloat = 10
@@ -138,9 +161,11 @@ final class IslandModel {
         Metrics.contentInset + earInset
     }
 
-    /// Top-row height that stays constant across presentations, so the header never jumps.
+    /// Top-row height that stays constant across presentations, so the header never jumps. It
+    /// matches the resting island, so opening only stretches it sideways out of the same spot
+    /// (and a menu-bar pill never hangs below the menu bar).
     var headerHeight: CGFloat {
-        geometry.style == .pill ? Metrics.pillHeaderHeight : geometry.closedSize.height
+        geometry.closedSize.height
     }
 
     private var compactWidth: CGFloat {
@@ -217,6 +242,7 @@ final class IslandModel {
 
     /// Shape morphs use bouncy springs; collapses use the overdamped one so they settle cleanly.
     var shapeAnimation: Animation {
+        if Date().timeIntervalSince(hoverChangedAt) < 0.05, presentation != .closed { return Motion.hover }
         switch presentation {
         case .closed: return Motion.close
         case .compact, .message: return Motion.widen
@@ -234,7 +260,7 @@ final class IslandModel {
         switch phase {
         case .listening: stop()
         case .preparing: cancel()
-        case .finishing: break
+        // Includes .finishing: the next take starts while the last one finishes.
         default: start()
         }
     }
@@ -245,7 +271,7 @@ final class IslandModel {
     /// and media isn't muffled until then; only the system mic indicator flashes.
     func arm() {
         switch phase {
-        case .idle, .done, .error: break
+        case .idle, .done, .error, .finishing: break
         default: return
         }
         guard !simulatesAudio, !isCapturing else { return }
@@ -265,11 +291,11 @@ final class IslandModel {
             isArmed = false
             dismissTask?.cancel()
             // Still setting up: `beginSession` shows the island once the mic is running.
-            if isCaptureRunning { setPhase(.listening) }
+            if isCaptureRunning { reveal(.listening) }
             return
         }
         switch phase {
-        case .listening, .finishing, .preparing: return
+        case .listening, .preparing: return
         default: break
         }
         guard !isCapturing else { return }
@@ -282,12 +308,22 @@ final class IslandModel {
         beginSession()
     }
 
+    /// Puts the current take on the island.
+    private func reveal(_ newPhase: DictationPhase) {
+        shownTake = generation
+        transcript = activePartial
+        setPhase(newPhase)
+    }
+
     private func beginSession() {
+        // A previous take still in its release tail gives up the mic now.
+        cutTail()
         generation += 1
         let session = generation
         isCapturing = true
         isCaptureRunning = false
-        transcript = ""
+        activePartial = ""
+        if settings.styleRewrite { StyleRewriter.prepare(style: settings.styleInstructions) }
         Task {
             // Each await can outlive the session (a disarm or cancel meanwhile).
             @MainActor func current() -> Bool { session == generation }
@@ -295,7 +331,7 @@ final class IslandModel {
                 return failSession(session, "Microphone access denied")
             }
             let resolution = await SpeechModelCatalog.resolve(settings.speechEngine, locale: settings.locale)
-            let transcriber = makeTranscriber(for: resolution)
+            let transcriber = makeTranscriber(for: resolution, take: session)
             guard await transcriber.requestPermission() else {
                 return failSession(session, "Speech recognition denied")
             }
@@ -306,7 +342,7 @@ final class IslandModel {
             if await SpeechModelCatalog.status(of: resolution) == .downloadable {
                 guard current() else { return }
                 isArmed = false
-                setPhase(.preparing(0))
+                reveal(.preparing(0))
                 do {
                     try await SpeechModelCatalog.install(resolution) { fraction in
                         Task { @MainActor [weak self] in
@@ -328,14 +364,14 @@ final class IslandModel {
             self.transcriber = transcriber
             activeEngine = resolution.engine
             do {
-                try audio.start(deviceUID: settings.microphoneUID, channel: settings.inputChannel) { buffer in
+                try audio.start(deviceUID: settings.resolvedMicrophoneUID, channel: settings.inputChannel) { buffer in
                     gate.push(buffer)
                 }
             } catch {
                 return failSession(session, error.localizedDescription)
             }
             isCaptureRunning = true
-            if !isArmed { setPhase(.listening) }
+            if !isArmed { reveal(.listening) }
 
             let setup = Task { @MainActor [weak self] () -> Bool in
                 do {
@@ -353,30 +389,78 @@ final class IslandModel {
 
     func stop() {
         guard phase == .listening else { return }
+        // The island and media react at the release; only the mic keeps going for the tail.
         setPhase(.finishing)
         if simulatesAudio { return }
-        audio.stop()
+        let take = generation
+        let spoken = listeningStartedAt.map { Date().timeIntervalSince($0) }
+        let transcriber = self.transcriber, setup = sessionSetup, fallback = activePartial
+        self.transcriber = nil
+        gate = nil
+        sessionSetup = nil
+        isCapturing = false
         isCaptureRunning = false
-        let session = generation
-        Task {
-            guard await sessionSetup?.value == true, let transcriber, session == generation else { return }
-            let text = await transcriber.finish()
-            guard session == generation else { return }
-            self.transcriber = nil
-            isCapturing = false
-            transcript = text
-            settings.record(text)
-            let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
-            setPhase(.done(result))
-            scheduleDismiss(after: 1.4)
+        startTail(for: take)
+
+        let tail = self.tail, previous = outputChain
+        outputChain = Task { [weak self] in
+            await tail?.value
+            var text = ""
+            if await setup?.value == true, let transcriber {
+                text = await Self.finish(transcriber, fallback: fallback)
+            }
+            // Formatting and the style rewrite run alongside earlier takes' pastes; only the
+            // paste itself waits its turn.
+            if let settings = self?.settings { text = await TextPipeline.process(text, settings: settings) }
+            await previous?.value
+            self?.deliver(text, take: take, seconds: spoken)
         }
+    }
+
+    private static func finish(_ transcriber: Transcriber, fallback: String) async -> String {
+        final class Result: @unchecked Sendable { var text = "" }
+        let result = Result()
+        let finished = await withDeadline(finishDeadline) { result.text = await transcriber.finish() }
+        return finished ? result.text : fallback
+    }
+
+    /// Records and pastes one finished take. Only the take on the island changes the island; an
+    /// earlier take finishing behind a newer one pastes without showing anything.
+    private func deliver(_ text: String, take: Int, seconds: Double?) {
+        if cancelledTakes.remove(take) != nil { return }
+        settings.record(text, seconds: seconds)
+        let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
+        guard take == shownTake, phase == .finishing else { return }
+        transcript = text
+        setPhase(.done(result))
+        scheduleDismiss(after: 1.4)
+    }
+
+    private func startTail(for take: Int) {
+        tailTake = take
+        tail = Task { [weak self] in
+            try? await Task.sleep(for: Self.releaseTail)
+            guard let self, self.tailTake == take else { return }
+            self.tailTake = nil
+            self.audio.stop()
+        }
+    }
+
+    /// Ends a release tail early, because a new take needs the mic.
+    private func cutTail() {
+        guard tailTake != nil else { return }
+        tailTake = nil
+        tail?.cancel()
+        audio.stop()
     }
 
     /// Gets the next dictation ready to start quickly: builds the mic engine for the current input
     /// (without opening the mic) and warms up the speech model lookup. Cheap to call again.
     func prepare() {
         guard !simulatesAudio else { return }
-        audio.prepare(deviceUID: settings.microphoneUID, channel: settings.inputChannel)
+        // Not during a release tail: the engine is still recording the last take.
+        guard tailTake == nil else { return }
+        audio.prepare(deviceUID: settings.resolvedMicrophoneUID, channel: settings.inputChannel)
         let engine = settings.speechEngine, locale = settings.locale
         Task.detached(priority: .utility) {
             let resolution = await SpeechModelCatalog.resolve(engine, locale: locale)
@@ -386,6 +470,7 @@ final class IslandModel {
 
     func cancel() {
         isArmed = false
+        if phase == .finishing { cancelledTakes.insert(shownTake) }
         if !simulatesAudio { endCapture() }
         transcript = ""
         setPhase(.idle)
@@ -396,9 +481,12 @@ final class IslandModel {
         generation += 1
         isCapturing = false
         isCaptureRunning = false
+        cutTail()
         audio.stop()
         transcriber?.cancel()
         transcriber = nil
+        gate = nil
+        sessionSetup = nil
     }
 
     private func failSession(_ session: Int, _ message: String) {
@@ -408,15 +496,26 @@ final class IslandModel {
         fail(message)
     }
 
-    private func makeTranscriber(for resolution: SpeechModelCatalog.Resolution) -> Transcriber {
+    private func makeTranscriber(for resolution: SpeechModelCatalog.Resolution, take: Int) -> Transcriber {
         let transcriber: Transcriber
+        let hints = settings.corrections.hints
         switch resolution.engine {
-        case .legacy: transcriber = AppleSpeechTranscriber()
-        case .parakeet: transcriber = ParakeetTranscriber()
-        default: transcriber = SpeechAnalyzerTranscriber(resolution: resolution)
+        case .legacy:
+            let apple = AppleSpeechTranscriber()
+            apple.contextualStrings = hints
+            transcriber = apple
+        case .bark: transcriber = SegmentedTranscriber { try await BarkModels.shared() }
+        case .parakeet: transcriber = SegmentedTranscriber { try await ParakeetModels.shared() }
+        default:
+            let analyzer = SpeechAnalyzerTranscriber(resolution: resolution)
+            analyzer.contextualStrings = hints
+            transcriber = analyzer
         }
         transcriber.onPartial = { [weak self] text in
-            guard let self, self.phase == .listening || self.phase == .finishing else { return }
+            guard let self else { return }
+            let text = self.settings.corrections.apply(to: text)
+            if take == self.generation { self.activePartial = text }
+            guard take == self.shownTake, self.phase == .listening || self.phase == .finishing else { return }
             withAnimation(Motion.content) { self.transcript = text }
         }
         return transcriber

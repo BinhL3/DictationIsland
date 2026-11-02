@@ -113,6 +113,44 @@ enum AudioDevices {
         inputs().first { $0.uid == uid }
     }
 
+    /// The input to open for a take. A chosen mic wins while it's connected. Otherwise this
+    /// follows the system default (as `AudioCapture` does for a missing mic), except that a Bluetooth headset (AirPods) is passed over for the built-in mic:
+    /// opening a headset's mic drops it into low-quality call audio, which hurts both the
+    /// recording and the music being muffled. With the lid closed the built-in mic can't hear
+    /// you, so the headset is used after all. nil means "system default".
+    static func preferredInputUID(selected: String?, avoidBluetooth: Bool) -> String? {
+        if let selected, device(uid: selected) != nil { return selected }
+        guard avoidBluetooth, let current = defaultInput(), isBluetooth(current.id), !isLidClosed(),
+              let builtIn = visibleInputs().first(where: { transportType($0.id) == kAudioDeviceTransportTypeBuiltIn })
+        else { return selected }
+        return builtIn.uid
+    }
+
+    static func isBluetooth(_ id: AudioDeviceID) -> Bool {
+        let transport = transportType(id)
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    private static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(id, &address, 0, nil, &size, &transport) == noErr ? transport : 0
+    }
+
+    /// A MacBook lid is shut (clamshell mode with an external display).
+    private static func isLidClosed() -> Bool {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != 0 else { return false }
+        defer { IOObjectRelease(service) }
+        let value = IORegistryEntryCreateCFProperty(service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)
+        return (value?.takeRetainedValue() as? Bool) ?? false
+    }
+
     private static func inputChannelCount(_ id: AudioDeviceID) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,

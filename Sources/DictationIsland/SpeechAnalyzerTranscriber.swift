@@ -11,6 +11,9 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
     /// `DictationTranscriber`: the model behind macOS keyboard dictation. Covers more languages,
     /// optimised for short dictated phrases.
     case appleDictation
+    /// Underdog Bark 3.0 on Core ML: Parakeet V3 post-trained for English. A one-time ~200 MB
+    /// download; English only.
+    case bark
     /// NVIDIA Parakeet TDT 0.6B v3 on Core ML: Handy's and Noi's recommended model. A one-time
     /// ~630 MB download; 25 European languages, detected automatically.
     case parakeet
@@ -24,6 +27,7 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         case .automatic: return "Automatic (best available)"
         case .appleSpeech: return "Apple Speech (newest model)"
         case .appleDictation: return "Apple Dictation (system dictation model)"
+        case .bark: return "Underdog Bark 3.0 (download, English)"
         case .parakeet: return "NVIDIA Parakeet V3 (download)"
         case .legacy: return "Legacy Speech Recognizer"
         }
@@ -34,6 +38,7 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         case .automatic: return "Automatic"
         case .appleSpeech: return "Apple Speech"
         case .appleDictation: return "Apple Dictation"
+        case .bark: return "Bark 3.0"
         case .parakeet: return "Parakeet V3"
         case .legacy: return "Legacy"
         }
@@ -66,6 +71,8 @@ enum SpeechModelCatalog {
             if let supported = await DictationTranscriber.supportedLocale(equivalentTo: locale) {
                 return Resolution(engine: .appleDictation, locale: supported)
             }
+        case .bark:
+            return Resolution(engine: .bark, locale: locale)
         case .parakeet:
             return Resolution(engine: .parakeet, locale: locale)
         case .legacy:
@@ -82,6 +89,8 @@ enum SpeechModelCatalog {
         case .appleDictation:
             let installed = await DictationTranscriber.installedLocales
             return installed.contains { $0.identifier(.bcp47) == resolution.locale.identifier(.bcp47) } ? .installed : .downloadable
+        case .bark:
+            return BarkModel.isInstalled ? .installed : .downloadable
         case .parakeet:
             return ParakeetModel.isInstalled ? .installed : .downloadable
         case .legacy:
@@ -93,6 +102,13 @@ enum SpeechModelCatalog {
 
     /// Downloads the on-device model if needed. `progress` reports 0...1.
     static func install(_ resolution: Resolution, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+        if resolution.engine == .bark {
+            try await BarkModel.download { progress?($0) }
+            // The first load compiles the encoder for this Mac, which takes minutes. Do it here,
+            // while the island shows the download, rather than silently during a dictation.
+            _ = try await BarkModels.shared()
+            return
+        }
         if resolution.engine == .parakeet {
             try await ParakeetModel.download { progress?($0) }
             ParakeetModels.preload()
@@ -125,7 +141,7 @@ enum SpeechModelCatalog {
                 reportingOptions: [.volatileResults, .frequentFinalization],
                 attributeOptions: []
             )
-        case .parakeet, .legacy, .automatic:
+        case .bark, .parakeet, .legacy, .automatic:
             return nil
         }
     }
@@ -143,6 +159,10 @@ final class SpeechAnalyzerTranscriber: Transcriber {
     var onPartial: ((String) -> Void)?
     /// Reported while a missing model downloads (0...1).
     var onModelDownload: ((Double) -> Void)?
+    /// Names and jargon the recognizer should favour (from the corrections list).
+    var contextualStrings: [String] = []
+    /// How long `finish` waits for the last result before using the text it already has.
+    static let finishDeadline: Duration = .seconds(3)
 
     private let resolution: SpeechModelCatalog.Resolution
     private var analyzer: SpeechAnalyzer?
@@ -158,16 +178,9 @@ final class SpeechAnalyzerTranscriber: Transcriber {
         self.resolution = resolution
     }
 
-    func requestPermission() async -> Bool {
-        // Ask once so the system can attribute speech use; analysis itself runs on-device,
-        // so a denial is left for the analyzer to report rather than blocking here.
-        if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-            await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { _ in continuation.resume() }
-            }
-        }
-        return true
-    }
+    /// SpeechAnalyzer runs on-device without the Speech Recognition permission (only the Legacy
+    /// engine needs it), so there's no prompt in the middle of someone's first dictation.
+    func requestPermission() async -> Bool { true }
 
     func begin(locale: Locale) async throws {
         guard let module = SpeechModelCatalog.makeModule(resolution) else { throw TranscriberError.unavailable }
@@ -189,8 +202,17 @@ final class SpeechAnalyzerTranscriber: Transcriber {
 
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         input = continuation
-        let analyzer = SpeechAnalyzer(modules: [module])
+        // `.lingering` keeps the model loaded between takes, so the next first partial comes sooner.
+        let analyzer = SpeechAnalyzer(
+            modules: [module],
+            options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .lingering)
+        )
         self.analyzer = analyzer
+        if !contextualStrings.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings[.general] = contextualStrings
+            try? await analyzer.setContext(context)
+        }
 
         resultsTask = Task { [weak self] in
             do {
@@ -221,12 +243,20 @@ final class SpeechAnalyzerTranscriber: Transcriber {
     func finish() async -> String {
         input?.finish()
         input = nil
-        if let analyzer {
-            try? await analyzer.finalizeAndFinishThroughEndOfInput()
-        }
-        await resultsTask?.value
-        analyzer = nil
+        let analyzer = self.analyzer, results = resultsTask
+        self.analyzer = nil
         resultsTask = nil
+        if let analyzer {
+            let finished = await withDeadline(Self.finishDeadline) {
+                try? await analyzer.finalizeAndFinishThroughEndOfInput()
+                await results?.value
+            }
+            if !finished {
+                // The analyzer hung; keep the finalized + volatile text it already gave us.
+                results?.cancel()
+                Task { await analyzer.cancelAndFinishNow() }
+            }
+        }
         return await MainActor.run { combined() }
     }
 

@@ -3,35 +3,9 @@ import ServiceManagement
 import Speech
 import SwiftUI
 
-struct SettingsView: View {
-    /// Reopens on the tab you last used.
-    @AppStorage("settingsTab") private var tab = "general"
-
-    var body: some View {
-        TabView(selection: $tab) {
-            GeneralSettings()
-                .tabItem { Label("General", systemImage: "gearshape") }
-                .tag("general")
-            SpeechSettings()
-                .tabItem { Label("Speech", systemImage: "waveform") }
-                .tag("speech")
-            MicrophoneSettings()
-                .tabItem { Label("Microphone", systemImage: "mic") }
-                .tag("microphone")
-            PermissionsSettings()
-                .tabItem { Label("Permissions", systemImage: "lock.shield") }
-                .tag("permissions")
-            HistorySettings()
-                .tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
-                .tag("history")
-        }
-        .frame(width: 520, height: 520)
-    }
-}
-
 // MARK: - General
 
-private struct GeneralSettings: View {
+struct GeneralSettings: View {
     @Bindable private var settings = AppSettings.shared
 
     var body: some View {
@@ -96,6 +70,7 @@ private struct GeneralSettings: View {
 
             Section {
                 LaunchAtLoginToggle()
+                Button("Run setup again…") { NotificationCenter.default.post(name: .runOnboarding, object: nil) }
             } footer: {
                 Text(Self.versionText)
                     .font(.caption)
@@ -268,7 +243,7 @@ private struct GlobeKeyWarning: View {
 
 // MARK: - Speech
 
-private struct SpeechSettings: View {
+struct SpeechSettings: View {
     @Bindable private var settings = AppSettings.shared
 
     var body: some View {
@@ -292,6 +267,7 @@ private struct SpeechSettings: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("**Apple Speech** is Apple's newest on-device model (macOS 26), the one behind Notes and Voice Memos transcription. Most accurate for longer dictation.")
                     Text("**Apple Dictation** is the model behind macOS keyboard dictation. It covers more languages and is tuned for short phrases.")
+                    Text("**Underdog Bark 3.0** is Parakeet V3 post-trained for English by Conway Research: as accurate in a much smaller model, and better on conversational speech. English only. One-time \(BarkModel.downloadSize.formatted(.byteCount(style: .file))) download.")
                     Text("**NVIDIA Parakeet V3** is the open model Handy and Noi recommend. 25 European languages, detected automatically, so the language setting doesn't apply. One-time \(ParakeetModel.downloadSize.formatted(.byteCount(style: .file))) download.")
                     Text("All of them run on-device and work offline once downloaded.")
                 }
@@ -342,6 +318,7 @@ private struct SpeechModelStatusRow: View {
 
     private var title: String {
         guard let resolution else { return "Checking…" }
+        if resolution.engine == .bark { return "Bark 3.0 · English" }
         if resolution.engine == .parakeet { return "Parakeet V3 · 25 languages, auto-detected" }
         let language = Locale.current.localizedString(forIdentifier: resolution.locale.identifier) ?? resolution.locale.identifier
         return "\(resolution.engine.shortName) · \(language)"
@@ -359,9 +336,11 @@ private struct SpeechModelStatusRow: View {
         case .installed: return "On-device model installed. Works offline."
         case .downloadable:
             if downloadProgress != nil { return "Downloading…" }
-            return resolution.engine == .parakeet
-                ? "Not downloaded yet (\(ParakeetModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
-                : "Model not downloaded yet. It also downloads on first use."
+            switch resolution.engine {
+            case .bark: return "Not downloaded yet (\(BarkModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
+            case .parakeet: return "Not downloaded yet (\(ParakeetModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
+            default: return "Model not downloaded yet. It also downloads on first use."
+            }
         case .unsupported: return "Not supported on this Mac."
         }
     }
@@ -405,9 +384,123 @@ private struct SpeechModelStatusRow: View {
     }
 }
 
+// MARK: - Writing
+
+struct WritingSettings: View {
+    @Bindable private var settings = AppSettings.shared
+    @State private var sample = "um so for the launch we need to finish the onboarding update the readme and uh tell the testers"
+    @State private var preview: String?
+    @State private var previewing = false
+
+    private static let presets: [(String, String)] = [
+        ("Casual", "Casual and friendly, like a text to a friend. Short sentences. Lowercase is fine."),
+        ("Professional", "Clear and professional, for work email and docs. Complete sentences, no slang."),
+        ("Concise", "As short as possible while keeping every point. No filler."),
+    ]
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Spoken formatting", isOn: $settings.spokenFormatting)
+            } header: {
+                Text("Formatting")
+            } footer: {
+                Text("Say **“new line”**, **“new paragraph”** or **“bullet point”** while dictating. Bullets paste as a real list in Notes, Mail, Docs and Slack, and as • lines everywhere else.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Tidy with Apple Intelligence", isOn: $settings.styleRewrite)
+                    .disabled(StyleRewriter.availability != nil && !settings.styleRewrite)
+                if let reason = StyleRewriter.availability {
+                    Text(reason).font(.caption).foregroundStyle(.orange)
+                }
+                TextEditor(text: $settings.styleInstructions)
+                    .frame(height: 64)
+                    .scrollContentBackground(.hidden)
+                    .overlay(alignment: .topLeading) {
+                        if settings.styleInstructions.isEmpty {
+                            Text("Describe how you want to sound, e.g. “casual, short sentences, no exclamation marks”")
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .disabled(!settings.styleRewrite)
+                HStack(spacing: 6) {
+                    ForEach(Self.presets, id: \.0) { preset in
+                        Button(preset.0) { settings.styleInstructions = preset.1 }
+                            .controlSize(.small)
+                    }
+                    Spacer()
+                }
+                .disabled(!settings.styleRewrite)
+            } header: {
+                Text("Writing style")
+            } footer: {
+                Text("Removes ums and false starts, fixes punctuation, turns spoken lists into bullets, and follows your description. Runs on this Mac; nothing is sent anywhere. Adds about a second before pasting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Preview") {
+                TextField("Sample", text: $sample, prompt: Text("Type something you might say"), axis: .vertical)
+                    .labelsHidden()
+                    .lineLimit(2...4)
+                HStack {
+                    Button(previewing ? "Working…" : "Preview") { runPreview() }
+                        .disabled(previewing || sample.isEmpty)
+                    Spacer()
+                }
+                if let preview {
+                    Text(preview)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+                }
+            }
+
+            Section {
+                TextEditor(text: $settings.correctionsText)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(height: 96)
+                    .scrollContentBackground(.hidden)
+                    .overlay(alignment: .topLeading) {
+                        if settings.correctionsText.isEmpty {
+                            Text("get hub -> GitHub\nParakeet")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            } header: {
+                Text("Words")
+            } footer: {
+                Text("One per line. Write **heard -> written** to fix something that keeps coming out wrong; it matches whole words in any case. A word on its own line is a hint: Apple Speech and Apple Dictation listen for it, and the fixes apply to every engine.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+        }
+        .formStyle(.grouped)
+    }
+
+    private func runPreview() {
+        previewing = true
+        let text = sample
+        Task {
+            preview = await TextPipeline.process(text, settings: settings)
+            previewing = false
+        }
+    }
+}
+
 // MARK: - Microphone
 
-private struct MicrophoneSettings: View {
+struct MicrophoneSettings: View {
     @Bindable private var settings = AppSettings.shared
     @State private var devices: [AudioInputDevice] = []
     @State private var defaultDevice: AudioInputDevice?
@@ -426,11 +519,13 @@ private struct MicrophoneSettings: View {
                         Text("Disconnected device").tag(Optional(uid))
                     }
                 }
+                Toggle("Use the built-in mic instead of Bluetooth headsets", isOn: $settings.avoidBluetoothMic)
+                    .disabled(devices.contains { $0.uid == settings.microphoneUID })
                 Picker("Channel", selection: $settings.inputChannel) {
                     ForEach(InputChannel.allCases) { Text($0.title).tag($0) }
                 }
                 .disabled(selectedChannelCount < 2)
-                Text("Stereo mics like the Blue Yeti have two channels. Use “Mix” unless only one side carries your voice.")
+                Text("On the system default (or when your chosen mic is unplugged), AirPods and other headsets are skipped for the built-in mic: using a headset's mic switches it to low-quality call audio. The headset is still used when the lid is closed. Stereo mics like the Blue Yeti have two channels; use “Mix” unless only one side carries your voice.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -438,7 +533,7 @@ private struct MicrophoneSettings: View {
             Section("Test") {
                 HStack(spacing: 12) {
                     Button(tester.isRunning ? "Stop Test" : "Test Microphone") {
-                        tester.isRunning ? tester.stop() : tester.start(uid: settings.microphoneUID, channel: settings.inputChannel)
+                        tester.isRunning ? tester.stop() : tester.start(uid: settings.resolvedMicrophoneUID, channel: settings.inputChannel)
                     }
                     WaveformView(meter: tester.meter, source: tester.isRunning ? .live : .suspended, color: .accentColor, barWidth: 4, spacing: 3,
                                  isPaused: !tester.isRunning)
@@ -537,7 +632,7 @@ private struct MuffleStyleRow: View {
 
 // MARK: - Permissions
 
-private struct PermissionsSettings: View {
+struct PermissionsSettings: View {
     /// Grants are tied to the code signature: stable for the locally signed install, not for ad-hoc builds.
     static let signingNote: String = {
         var code: SecCode?
@@ -559,7 +654,7 @@ private struct PermissionsSettings: View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             Form {
                 Section {
-                    ForEach(Permission.allCases) { permission in
+                    ForEach(Permission.visible) { permission in
                         PermissionRow(permission: permission)
                     }
                 } footer: {
@@ -601,7 +696,7 @@ private struct PermissionRow: View {
 
 // MARK: - History
 
-private struct HistorySettings: View {
+struct HistorySettings: View {
     @Bindable private var settings = AppSettings.shared
 
     var body: some View {
@@ -639,22 +734,29 @@ private struct HistorySettings: View {
     }
 }
 
-// MARK: - Window
+// MARK: - Annotate
 
-@MainActor
-final class SettingsWindowController {
-    private var window: NSWindow?
+struct AnnotateSettings: View {
+    @Bindable private var settings = AppSettings.shared
 
-    func show() {
-        if window == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
-            window.title = "DictationIsland Settings"
-            window.styleMask = [.titled, .closable, .miniaturizable]
-            window.isReleasedWhenClosed = false
-            window.center()
-            self.window = window
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Annotate the screen with ⌃⌥A", isOn: $settings.annotateEnabled)
+                Button("Show Annotations Folder") {
+                    try? FileManager.default.createDirectory(at: AnnotationController.folder, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(AnnotationController.folder)
+                }
+                .disabled(!settings.annotateEnabled)
+            } header: {
+                Text("Annotate for AI agents")
+            } footer: {
+                Text("Tap ⌃⌥A, talk through what's on screen and hold ⇧ to draw on it, then tap ⌃⌥A again. You get screenshots of each moment, a timestamped transcript and the video, with a message ready to paste into Claude Code or another agent. Needs Screen Recording permission the first time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
         }
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        .formStyle(.grouped)
     }
 }

@@ -21,11 +21,11 @@ the menu bar.
 3. Open it from Applications. The app isn't notarized by Apple, so the first launch is blocked:
    go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
    (Or run `xattr -dr com.apple.quarantine /Applications/DictationIsland.app` once.)
-4. Settings opens on the **Permissions** tab. Grant:
-   - **Microphone** and **Speech Recognition**, to hear and transcribe you;
-   - **Input Monitoring**, for the hold-to-talk key;
-   - **Accessibility**, to paste into the focused app (without it, text is only copied);
-   - **System Audio Recording** (optional), to muffle music while you talk.
+4. A short setup walks you through two permissions, **Microphone** and **Accessibility**
+   (for the dictation key and pasting), while the speech model downloads, then lets you try a
+   dictation. A small guide docks under System Settings showing what to drag where.
+   Optional later: **System Audio Recording** (muffle music while you talk) and
+   **Screen Recording** (annotations).
 
 ### Build from source
 
@@ -50,7 +50,19 @@ make install     # build, sign, install to /Applications, launch
   If you use fn, set System Settings → Keyboard → "Press 🌐 key to" → *Do Nothing*.
 * **Hover** the island while dictating to see the whole transcript, with Cancel and Done.
 * **⌃⌥Space** is an optional backup shortcut that needs no permissions (off by default).
+* **Formatting**: say "new line", "new paragraph" or "bullet point". Bullets paste as a real list
+  in Notes, Mail, Docs and Slack.
+* **Words** (Settings → Writing): fix things it keeps mishearing (`get hub -> GitHub`) and teach it
+  names.
+* **Writing style** (Settings → Writing, optional): tidies each dictation with Apple Intelligence's
+  on-device model, removing ums and false starts and following a description of how you write.
+* **Annotate for AI agents**: tap **⌃⌥A**, talk through what's on screen and hold **⇧** to draw on
+  it, tap ⌃⌥A again. You get screenshots of each moment, a timestamped transcript and the video,
+  with a message ready to paste into Claude Code or another agent.
 * **History**: the last 100 dictations are in Settings → History.
+* **Updates**: once a day the app asks GitHub whether a newer release exists (one request to the
+  public releases API; nothing about you is sent). If so, Home shows a Download button. Drag the new
+  version into Applications; settings and permissions carry over.
 * Open Settings from the menu bar 〰 icon, or by opening the app again.
 
 ### Speech engines (Settings → Speech)
@@ -59,6 +71,7 @@ make install     # build, sign, install to /Applications, launch
 |---|---|
 | **Apple Speech** | Apple's newest on-device model (`SpeechTranscriber`). |
 | **Apple Dictation** | The model behind macOS keyboard dictation (`DictationTranscriber`). |
+| **Underdog Bark 3.0** | Parakeet V3 post-trained for English: as accurate overall, better on conversational speech. One-time ~200 MB download, runs on Core ML. The first load compiles it for the Neural Engine, which takes several minutes. |
 | **NVIDIA Parakeet V3** | 25 European languages, auto-detected. One-time ~630 MB download, runs on Core ML. |
 | **Legacy** | `SFSpeechRecognizer`. |
 
@@ -99,7 +112,9 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 | `AudioCapture.swift` | Chosen input → mono downmix (channel select) → FFT → voice bands; prepared engine for fast starts |
 | `Transcriber.swift` | `Transcriber` protocol + legacy `SFSpeechRecognizer` engine |
 | `SpeechAnalyzerTranscriber.swift` | `SpeechAnalyzer` engines (Apple Speech / Apple Dictation), model install, engine resolution |
-| `Parakeet.swift` | Parakeet TDT 0.6B v3 on Core ML: pinned model download, TDT greedy decode, live re-decoding, pause-aligned 15 s segments |
+| `LocalModels.swift` | Shared by the downloaded engines: pinned Hugging Face downloads, live re-decoding, pause-aligned 15 s segments |
+| `Parakeet.swift` | Parakeet TDT 0.6B v3 on Core ML: model files, TDT greedy decode |
+| `Bark.swift` | Bark 3.0: Core ML encoder, mel frontend and TDT decoder ported from the reference Python, `.npz` reader |
 | `MediaMuffler.swift` | Process tap + aggregate device + realtime low-pass sweep; volume-fade fallback with crash-safe restore |
 | `TextInserter.swift` | Clipboard + synthetic ⌘V |
 | `ModifierKeyTrigger.swift` | Multi-key push-to-talk (fn / any modifier side) via a listen-only event tap; ignores chords |
@@ -112,13 +127,18 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 
 ## Credits
 
+Onboarding, the permission guide, annotations, the release tail and several reliability fixes
+follow ideas from [Hex](https://github.com/anomalyco/hex) (MIT); no Hex code is included.
+
 Inspired by the notch UI of [Alcove](https://tryalcove.com). DictationIsland is an independent
 project, not affiliated with or endorsed by Alcove, and contains none of its code or assets.
 
 Parakeet V3 weights: NVIDIA (CC-BY-4.0), Core ML export by FluidInference
-(`FluidInference/parakeet-tdt-0.6b-v3-coreml`). Process-tap setup follows insidegui/AudioCap.
+(`FluidInference/parakeet-tdt-0.6b-v3-coreml`). Bark 3.0 weights: Conway Research
+(`ConwayResearch/Underdog-Bark-3.0`, CC-BY-4.0), derived from NVIDIA's Parakeet TDT 0.6B v3 and
+Moondream's parakeet-ultra. Process-tap setup follows insidegui/AudioCap.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The Parakeet model is downloaded separately and stays under its own
-CC-BY-4.0 license.
+MIT, see [LICENSE](LICENSE). The Parakeet and Bark models are downloaded separately and stay under
+their own CC-BY-4.0 licenses.

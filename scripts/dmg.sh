@@ -12,5 +12,6 @@ ln -s /Applications "$STAGE/Applications"
 
 DMG="build/DictationIsland-$VERSION.dmg"
 rm -f "$DMG"
-hdiutil create -volname "DictationIsland $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+# HFS+ explicitly: newer macOS defaults to an APFS image that older hdiutil/macOS 26 can reject.
+hdiutil create -volname "DictationIsland $VERSION" -srcfolder "$STAGE" -fs HFS+ -ov -format UDZO "$DMG" >/dev/null 2>&1
 echo "Built $DMG"

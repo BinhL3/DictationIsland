@@ -20,8 +20,9 @@ struct IslandView: View {
             .frame(width: size.width, height: size.height)
             .shadow(color: .black.opacity(model.presentation == .closed ? 0 : 0.35), radius: 12, y: 4)
             // A hidden idle island shrinks into nothing and grows back out when dictation starts.
+            // A pill grows from its centre so it emerges concentric with a notch app's pill.
             .opacity(isHiddenIdle ? 0 : 1)
-            .scaleEffect(isHiddenIdle ? 0.6 : 1, anchor: .top)
+            .scaleEffect(isHiddenIdle ? 0.6 : 1, anchor: model.geometry.style == .pill ? .center : .top)
             .modifier(ShakeEffect(position: model.shakeTrigger))
             .animation(model.shapeAnimation, value: model.presentation)
             .animation(model.shapeAnimation, value: model.geometry)

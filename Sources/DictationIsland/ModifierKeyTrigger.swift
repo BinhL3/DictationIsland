@@ -65,6 +65,8 @@ final class ModifierKeyTrigger {
     var onTap: (() -> Void)?
     /// Became a shortcut chord after the hold had already started.
     var onChordAfterHold: (() -> Void)?
+    /// The trigger key went down (the key) or came up / was dropped (nil). For showing it.
+    var onKeyState: ((TriggerKey?) -> Void)?
 
     /// Changing the keys mid-press drops the press.
     var keys: Set<TriggerKey> {
@@ -75,6 +77,12 @@ final class ModifierKeyTrigger {
     static let holdThreshold: TimeInterval = 0.2
 
     private var tap: CFMachPort?
+    private var tapSource: CFRunLoopSource?
+    /// macOS can switch the tap off without telling us (sleep, secure input, an Accessibility
+    /// change); this checks every few seconds and turns it back on, or rebuilds it.
+    private var healthTimer: Timer?
+    /// Keeps App Nap from throttling the main run loop the tap is delivered on.
+    private var activity: NSObjectProtocol?
     /// The trigger key currently held, if any.
     private var downKey: TriggerKey?
     private var isHolding = false
@@ -115,15 +123,50 @@ final class ModifierKeyTrigger {
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         self.tap = tap
+        tapSource = source
+        if healthTimer == nil {
+            let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.checkTapHealth() }
+            RunLoop.main.add(timer, forMode: .common)
+            healthTimer = timer
+        }
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Listening for the push-to-talk key"
+            )
+        }
         return true
     }
 
+    private func checkTapHealth() {
+        guard let tap else { return }
+        if !CFMachPortIsValid(tap) {
+            reset()
+            if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+            self.tap = nil
+            tapSource = nil
+            start()
+        } else if !CGEvent.tapIsEnabled(tap: tap) {
+            // Events were missed while it was off, so the held-key state can't be trusted.
+            reset()
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+    }
+
     func handle(_ type: CGEventType, _ event: CGEvent) {
+        // Our own ⌘V (pasting a finished take while the next one is held) isn't a chord.
+        if event.getIntegerValueField(.eventSourceUserData) == TextInserter.syntheticEventMarker { return }
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            // A release may have been missed while the tap was off.
+            reset()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         case .flagsChanged:
             let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if let downKey, code != downKey.keyCode, !downKey.isDown(flags: event.flags.rawValue) {
+                // Another modifier changed and the flags say the held key is already up: its
+                // release never arrived, so drop the stale press.
+                reset()
+            }
             if let key = keys.first(where: { $0.keyCode == code }), downKey == nil || downKey == key {
                 key.isDown(flags: event.flags.rawValue) ? pressed(key) : released(key)
             } else if downKey != nil {
@@ -134,8 +177,11 @@ final class ModifierKeyTrigger {
         }
     }
 
+    /// Forgets the current press. A hold in progress is finished rather than dropped, so the
+    /// dictation isn't lost; a press that hadn't become a hold is treated as a shortcut.
     private func reset() {
-        if downKey != nil, !isHolding, !isChorded { onChordBeforeHold?() }
+        if downKey != nil, !isChorded { isHolding ? onHoldEnd?() : onChordBeforeHold?() }
+        if downKey != nil { onKeyState?(nil) }
         holdWork?.cancel()
         downKey = nil
         isHolding = false
@@ -154,6 +200,7 @@ final class ModifierKeyTrigger {
         }
         holdWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdThreshold, execute: work)
+        onKeyState?(key)
         onPress?()
     }
 
@@ -161,6 +208,7 @@ final class ModifierKeyTrigger {
         guard downKey == key else { return }
         downKey = nil
         holdWork?.cancel()
+        onKeyState?(nil)
         if isChorded { return }
         isHolding ? onHoldEnd?() : onTap?()
         isHolding = false

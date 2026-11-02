@@ -13,6 +13,35 @@ protocol Transcriber: AnyObject {
     func cancel()
 }
 
+/// Runs `work`, but stops waiting after `timeout`. Returns false if the deadline won; the work
+/// keeps running in the background and its result is ignored. Used so a recognizer that never
+/// finalizes can't leave the island stuck on "finishing".
+func withDeadline(_ timeout: Duration, _ work: @escaping @Sendable () async -> Void) async -> Bool {
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Bool, Never>?
+        init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+        func resume(_ value: Bool) {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: value)
+        }
+    }
+    return await withCheckedContinuation { continuation in
+        let once = Once(continuation)
+        Task {
+            await work()
+            once.resume(true)
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            once.resume(false)
+        }
+    }
+}
+
 enum TranscriberError: LocalizedError {
     case unavailable
 
@@ -22,6 +51,8 @@ enum TranscriberError: LocalizedError {
 /// Legacy `SFSpeechRecognizer` engine.
 final class AppleSpeechTranscriber: Transcriber {
     var onPartial: ((String) -> Void)?
+    /// Names and jargon the recognizer should favour (from the corrections list).
+    var contextualStrings: [String] = []
 
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -44,6 +75,7 @@ final class AppleSpeechTranscriber: Transcriber {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
+        request.contextualStrings = contextualStrings
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
