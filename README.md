@@ -45,10 +45,18 @@ make install     # build, sign, install to /Applications, launch
 
 * **Hold to talk.** Hold a push-to-talk key, speak, release. The text is pasted into the focused
   app and also left on the clipboard. **Tap** the key instead for hands-free mode; tap again to
-  finish. Defaults to **fn** and **right ⌥**; add or change keys in Settings → General. Using the
-  key in a shortcut (like right ⌘C) doesn't start a dictation.
+  finish. Defaults to **fn** and **right ⌥**; add or change keys in Settings → Shortcuts & Island.
+  *How the key works* switches between hold or tap, hold only, and press once to start and again
+  to stop. Using the key in a shortcut (like right ⌘C) doesn't start a dictation.
   If you use fn, set System Settings → Keyboard → "Press 🌐 key to" → *Do Nothing*.
 * **Hover** the island while dictating to see the whole transcript, with Cancel and Done.
+* **Live edits** (experimental, on by default): as the recognizer revises itself or the clean-up
+  tidies a sentence, changed words flash green and dropped words stay a moment, struck through in
+  red.
+* **Fix that**: tap **right ⌘** after a dictation and Apple Intelligence rewrites it and swaps it
+  in place (if you've typed since, the fixed version is copied instead).
+* **Include computer audio**: tap **left ⇧** while dictating and what your Mac is playing (a
+  video, a call) is transcribed along with you. Tap again to stop.
 * **⌃⌥Space** is an optional backup shortcut that needs no permissions (off by default).
 * **Formatting**: say "new line", "new paragraph" or "bullet point". Bullets paste as a real list
   in Notes, Mail, Docs and Slack.
@@ -56,14 +64,18 @@ make install     # build, sign, install to /Applications, launch
   names.
 * **Writing style** (Settings → Writing, optional): tidies each dictation with Apple Intelligence's
   on-device model, removing ums and false starts and following a description of how you write.
+  It adapts to the app you're in (casual in Messages, tidier in Mail). Laughing can add an emoji.
 * **Annotate for AI agents**: tap **⌃⌥A**, talk through what's on screen and hold **⇧** to draw on
   it, tap ⌃⌥A again. You get screenshots of each moment, a timestamped transcript and the video,
   with a message ready to paste into Claude Code or another agent.
 * **History**: the last 100 dictations are in Settings → History.
+* **Per-app**: turn dictation off in apps that have their own (Lark and Feishu start off) so the
+  key passes straight to them (Settings → Shortcuts & Island → Apps).
+* **Keyboard**: in the app window, ⌘1–⌘8 switch pages; hold ⌘ to see which is which.
 * **Updates**: once a day the app asks GitHub whether a newer release exists (one request to the
   public releases API; nothing about you is sent). If so, Home shows a Download button. Drag the new
   version into Applications; settings and permissions carry over.
-* Open Settings from the menu bar 〰 icon, or by opening the app again.
+* Open the app window from the menu bar 〰 icon, or by opening the app again.
 
 ### Speech engines (Settings → Speech)
 
@@ -85,8 +97,12 @@ make install     # build, sign, install to /Applications, launch
 * **Microphone**: pick any input, and for stereo mics like the Blue Yeti, which channel to use.
   *Test Microphone* shows live levels. Mics hidden by a leftover driver extension (e.g. Logitech
   G HUB's "Blue Voice") are still found and listed.
-* **Placement**: in the notch (or a menu bar pill), or below the menu bar. If you run another notch app such as Alcove,
-  DictationIsland draws over it while you dictate and stays out of its way otherwise.
+* **Placement**: drag the island on the little MacBook on Home: in the notch (or a menu bar
+  pill), below the menu bar, or above the Dock. It latches onto each spot. On a MacBook with a
+  hole-punch camera instead of a notch, set *Camera cutout* to *Camera hole* and the island rests
+  as a pill around it. If you run another notch app such as Alcove, DictationIsland draws over it
+  while you dictate and stays out of its way otherwise.
+* **Sound cues**: Classic or Signature clicks for start and stop, with a volume slider, or off.
 * **Open at login** (install to /Applications first).
 
 ## Development
@@ -106,7 +122,16 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 | `IslandView.swift` | Island shell, wings, live transcript line, expanded body |
 | `IslandPanel.swift` | Non-activating fixed-canvas panel, hover/click-through, layering with other notch apps |
 | `WindowSpace.swift` | Private window-server space with an absolute level, so the island draws above menu bar apps |
-| `NotchGeometry.swift` | Notch vs pill detection, `NotchShape` |
+| `NotchGeometry.swift` | Notch / camera hole / pill detection, top and bottom edges, `NotchShape` (morphs notch ↔ pill) |
+| `PlacementScreen.swift` | The draggable MacBook placement picker on Home, magnetic snapping |
+| `LiveEdits.swift` | Word-level diff behind the green/red live edits |
+| `AppRules.swift` | Per-app on/off for the dictation keys |
+| `WritingContext.swift` | Reads the focused app and field so the clean-up can match it |
+| `Shortcuts.swift` | Recordable shortcuts (single modifier taps or combinations) for Fix that, Annotate, computer audio |
+| `SystemAudioCapture.swift` | Computer audio as a second transcription source |
+| `SoundCues.swift` | Start/stop sound sets |
+| `LaughDetector.swift` | Spots laughter for the emoji |
+| `SecondOpinion.swift` | Fix that: keeps the take's audio and transcribes it again with a different engine |
 | `Motion.swift` | Shared springs and transitions |
 | `WaveformView.swift` | Bar waveform (live/simulated/suspended), recording dot, shimmer |
 | `AudioCapture.swift` | Chosen input → mono downmix (channel select) → FFT → voice bands; prepared engine for fast starts |
@@ -122,13 +147,16 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 | `AppSettings.swift` | Preferences (UserDefaults) and dictation history |
 | `AudioDevices.swift` | Core Audio input device list (name, UID, channel count) |
 | `Permissions.swift` | Status and grant flow for the permissions |
-| `SettingsView.swift` | Settings window: General, Speech, Microphone, Permissions, History |
+| `MainWindow.swift` | App window: sidebar, Home (stats, Try it, placement), ⌘-number navigation |
+| `SettingsView.swift` | Settings pages: Shortcuts & Island, Speech, Writing, Microphone, Annotate, History, Permissions |
 | `scripts/` | `bundle.sh` (app), `install.sh`, `dmg.sh`, `signing.sh` (local identity), `make-icon.swift` |
 
 ## Credits
 
 Onboarding, the permission guide, annotations, the release tail and several reliability fixes
-follow ideas from [Hex](https://github.com/anomalyco/hex) (MIT); no Hex code is included.
+follow ideas from [Hex](https://github.com/anomalyco/hex) (MIT); no Hex code is included. The
+sound cues are Hex's Classic and Signature sets, bundled under its MIT license
+(`Resources/Sounds/LICENSE-Hex`).
 
 Inspired by the notch UI of [Alcove](https://tryalcove.com). DictationIsland is an independent
 project, not affiliated with or endorsed by Alcove, and contains none of its code or assets.

@@ -24,6 +24,8 @@ if [[ ! -f build/AppIcon.icns || scripts/make-icon.swift -nt build/AppIcon.icns 
   iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns
 fi
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$APP/Contents/Resources/Sounds"
+cp -R Resources/Sounds "$APP/Contents/Resources/Sounds"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

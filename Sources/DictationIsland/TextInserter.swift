@@ -49,12 +49,26 @@ enum TextInserter {
     /// Dvorak it's "k", so a hard-coded ⌘ + key 9 silently doesn't paste. Layouts like
     /// "Dvorak – QWERTY ⌘" switch to QWERTY while ⌘ is down, which the ⌘ lookup honours.
     /// Non-Latin layouts (Russian, Greek) fall back to the ASCII-capable layout, as AppKit does.
-    private static func pasteKeyCode() -> CGKeyCode {
+    private static func pasteKeyCode() -> CGKeyCode { commandKeyCode(for: "v", qwerty: 9) }
+
+    private static func commandKeyCode(for character: Character, qwerty: CGKeyCode) -> CGKeyCode {
         let sources = [TISCopyCurrentKeyboardLayoutInputSource(), TISCopyCurrentASCIICapableKeyboardLayoutInputSource()]
         for source in sources.compactMap({ $0?.takeRetainedValue() }) {
-            if let code = keyCode(typing: "v", in: source) { return code }
+            if let code = keyCode(typing: character, in: source) { return code }
         }
-        return 9
+        return qwerty
+    }
+
+    /// ⌘Z in the frontmost app, to take back our last paste ("Fix that").
+    @MainActor static func undo() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let key = commandKeyCode(for: "z", qwerty: 6)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down)
+            event?.flags = .maskCommand
+            event?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+            event?.post(tap: .cghidEventTap)
+        }
     }
 
     private static func keyCode(typing character: Character, in source: TISInputSource) -> CGKeyCode? {

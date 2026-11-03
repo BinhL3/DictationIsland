@@ -605,7 +605,7 @@ private struct DonePage: View {
             IslandHero(model: model.demo).padding(.horizontal, 28).padding(.top, 44)
             Headline(title: "You're ready", subtitle: "A few things worth knowing.")
             VStack(alignment: .leading, spacing: 12) {
-                Tip(icon: "hand.tap", text: "Hold \(key) to talk. Tap it once for hands-free, tap again to finish.")
+                Tip(icon: "hand.tap", text: AppSettings.shared.talkMode.howTo(key) + " Change it in Shortcuts & Island.")
                 Tip(icon: "text.badge.checkmark", text: "Teach it names and fixes in Settings → Writing. Say “bullet point” for lists.")
                 Tip(icon: "waveform", text: "Settings live in the menu bar 〰 icon.")
             }

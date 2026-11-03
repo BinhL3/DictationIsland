@@ -25,20 +25,44 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         var icon: String {
             switch self {
-            case .home: return "house"
-            case .shortcuts: return "keyboard"
+            case .home: return "house.fill"
+            case .shortcuts: return "keyboard.fill"
             case .speech: return "waveform"
-            case .writing: return "text.badge.checkmark"
-            case .microphone: return "mic"
-            case .annotate: return "pencil.tip.crop.circle"
-            case .history: return "clock.arrow.circlepath"
-            case .permissions: return "lock.shield"
+            case .writing: return "text.quote"
+            case .microphone: return "mic.fill"
+            case .annotate: return "pencil.tip"
+            case .history: return "clock.fill"
+            case .permissions: return "hand.raised.fill"
             }
         }
+
+        /// Tile colour, System Settings style: each page gets its own.
+        var tint: Color {
+            switch self {
+            case .home: return Color(red: 0.20, green: 0.48, blue: 0.98)
+            case .shortcuts: return Color(white: 0.45)
+            case .speech: return Color(red: 0.58, green: 0.36, blue: 0.95)
+            case .writing: return Color(red: 0.98, green: 0.58, blue: 0.16)
+            case .microphone: return Color(red: 0.96, green: 0.27, blue: 0.33)
+            case .annotate: return Color(red: 0.94, green: 0.30, blue: 0.62)
+            case .history: return Color(red: 0.18, green: 0.72, blue: 0.62)
+            case .permissions: return Color(red: 0.16, green: 0.52, blue: 0.96)
+            }
+        }
+
+        /// Sidebar groups, with a small heading over each (none over Home).
+        static let groups: [(title: String?, sections: [Section])] = [
+            (nil, [.home]),
+            ("Dictation", [.shortcuts, .speech, .writing, .microphone]),
+            ("Tools", [.annotate]),
+            ("App", [.history, .permissions]),
+        ]
     }
 
     private var window: NSWindow?
     private let navigation = MainNavigation()
+    /// Watches ⌘ while the window is in front, to show the ⌘1…⌘8 hints in the sidebar.
+    private var commandMonitor: Any?
     /// The real island, so Home can play it in place of the notch.
     var liveIsland: IslandModel?
 
@@ -57,6 +81,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             window.setContentSize(CGSize(width: 880, height: 620))
             window.title = "DictationIsland"
             window.titlebarAppearsTransparent = true
+            // Each page draws its own icon + title header, like System Settings.
+            window.titleVisibility = .hidden
             window.toolbarStyle = .unified
             window.minSize = CGSize(width: 760, height: 520)
             window.isReleasedWhenClosed = false
@@ -68,8 +94,24 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             trackTitle()
             for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
                 NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.updateInAppPreview() }
+                    MainActor.assumeIsolated {
+                        self?.updateInAppPreview()
+                        // A ⌘ released in another app never reaches us.
+                        self?.navigation.showsShortcutHints = false
+                    }
                 }
+            }
+            // Only ⌘ on its own: ⌘ with ⇧, ⌥ or ⌃ is some other shortcut.
+            commandMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, event.window === self.window else { return }
+                    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .function, .numericPad])
+                    let shows = flags == .command
+                    if self.navigation.showsShortcutHints != shows {
+                        withAnimation(.easeOut(duration: 0.15)) { self.navigation.showsShortcutHints = shows }
+                    }
+                }
+                return event
             }
         }
         AppPresence.windowOpened()
@@ -116,15 +158,24 @@ enum AppPresence {
     }
 }
 
+extension Notification.Name {
+    static let showShortcuts = Notification.Name("DictationIsland.showShortcuts")
+}
+
 @MainActor
 @Observable
 final class MainNavigation {
     var section: MainWindowController.Section {
         didSet { UserDefaults.standard.set(section.rawValue, forKey: "mainSection") }
     }
+    /// ⌘ is held: the sidebar shows each page's ⌘-number.
+    var showsShortcutHints = false
 
     init() {
         section = UserDefaults.standard.string(forKey: "mainSection").flatMap(MainWindowController.Section.init) ?? .home
+        NotificationCenter.default.addObserver(forName: .showShortcuts, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.section = .shortcuts }
+        }
     }
 }
 
@@ -132,26 +183,58 @@ private struct MainView: View {
     @Bindable var navigation: MainNavigation
     let liveIsland: IslandModel?
 
+    /// Matches the View menu: pages in sidebar order get ⌘1…⌘9.
+    static func shortcutNumber(_ section: MainWindowController.Section) -> Int? {
+        let pages = MainWindowController.Section.groups.flatMap(\.sections)
+        return pages.firstIndex(of: section).map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil }
+    }
+
     var body: some View {
         NavigationSplitView {
-            List(MainWindowController.Section.allCases, selection: Binding(
+            List(selection: Binding(
                 get: { navigation.section },
                 set: { if let new = $0 { navigation.section = new } }
-            )) { section in
-                Label(section.title, systemImage: section.icon).tag(section)
+            )) {
+                ForEach(MainWindowController.Section.groups, id: \.sections) { group in
+                    Section {
+                        ForEach(group.sections) { section in
+                            HStack(spacing: 10) {
+                                IconTile(section: section, size: 24)
+                                Text(section.title).font(.system(size: 13.5))
+                                Spacer(minLength: 4)
+                                if navigation.showsShortcutHints, let number = Self.shortcutNumber(section) {
+                                    Text("⌘\(number)")
+                                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .transition(.opacity)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            .tag(section)
+                        }
+                    } header: {
+                        if let title = group.title { Text(title) }
+                    }
+                }
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 200, max: 240)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 214, max: 250)
         } detail: {
             Group {
                 switch navigation.section {
                 case .home: HomeView(navigation: navigation, liveIsland: liveIsland)
-                case .shortcuts: GeneralSettings()
-                case .speech: SpeechSettings()
-                case .writing: WritingSettings()
-                case .microphone: MicrophoneSettings()
-                case .annotate: AnnotateSettings()
-                case .history: HistorySettings()
-                case .permissions: PermissionsSettings()
+                default:
+                    VStack(spacing: 0) {
+                        PageHeader(section: navigation.section)
+                        switch navigation.section {
+                        case .shortcuts: GeneralSettings()
+                        case .speech: SpeechSettings()
+                        case .writing: WritingSettings()
+                        case .microphone: MicrophoneSettings()
+                        case .annotate: AnnotateSettings()
+                        case .history: HistorySettings()
+                        default: PermissionsSettings()
+                        }
+                    }
                 }
             }
             // Settings forms sit on the same island black as Home.
@@ -162,6 +245,43 @@ private struct MainView: View {
         .focusEffectDisabled()
         .frame(minWidth: 760, minHeight: 520)
         .environment(\.colorScheme, .dark)
+    }
+}
+
+/// A rounded colour tile with a white symbol, like System Settings' sidebar.
+private struct IconTile: View {
+    let section: MainWindowController.Section
+    let size: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+            .fill(LinearGradient(colors: [section.tint.opacity(0.92), section.tint], startPoint: .top, endPoint: .bottom))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+            .overlay(
+                Image(systemName: section.icon)
+                    .font(.system(size: size * 0.5, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+            .frame(width: size, height: size)
+            .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+    }
+}
+
+/// The page's tile and name above its settings.
+private struct PageHeader: View {
+    let section: MainWindowController.Section
+
+    var body: some View {
+        HStack(spacing: 10) {
+            IconTile(section: section, size: 28)
+            Text(section.title).font(.system(size: 20, weight: .bold))
+            Spacer()
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 14)
+        .padding(.bottom, 2)
+        .frame(maxWidth: 700)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -185,7 +305,7 @@ private struct HomeView: View {
     }
 
     private var keyHint: String {
-        settings.pushToTalkDescription.map { "Hold \($0) to talk, or tap it for hands-free." } ?? "Add a push-to-talk key in Shortcuts & Island."
+        settings.pushToTalkDescription.map { settings.talkMode.howTo($0) } ?? "Add a push-to-talk key in Shortcuts & Island."
     }
 
     var body: some View {
@@ -216,17 +336,9 @@ private struct HomeView: View {
         return island
     }
 
-    /// Height of the fake menu bar, so the island sits in the preview where it sits on screen.
-    private var menuBarHeight: CGFloat {
-        let geometry = (liveIsland ?? island).geometry
-        if geometry.style == .notch { return geometry.closedSize.height }
-        if settings.placement.resolved == .belowMenuBar { return max(24, geometry.topInset - 6) }
-        return geometry.closedSize.height + 2 * geometry.topInset
-    }
-
     private var placement: Binding<IslandPlacement> {
         Binding(
-            get: { settings.placement.resolved == .belowMenuBar ? .belowMenuBar : .automatic },
+            get: { settings.placement.resolved == .menuBar ? .automatic : settings.placement.resolved },
             set: { settings.placement = $0 }
         )
     }
@@ -234,31 +346,23 @@ private struct HomeView: View {
     /// Copies the real island's size and position onto the demo.
     private func syncDemo() {
         guard let liveIsland else { return }
-        island.updateGeometry(liveIsland.geometry)
-        island.showsIdleIsland = liveIsland.showsIdleIsland
+        // The preview moves itself when dragged; anything else (opening Home, a change made in
+        // Settings) just puts the island in place, without flying it there.
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { island.updateGeometry(liveIsland.geometry) }
+        if island.showsIdleIsland != liveIsland.showsIdleIsland {
+            withAnimation(Motion.content) { island.showsIdleIsland = liveIsland.showsIdleIsland }
+        }
     }
 
     private var hero: some View {
         VStack(alignment: .leading, spacing: 18) {
-            LinearGradient(colors: [Color(white: 0.16), Color(white: 0.06)], startPoint: .top, endPoint: .bottom)
-                .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.06)).frame(height: menuBarHeight) }
-                .overlay(alignment: .top) {
-                    // While Home is in front this *is* the island: dictations play here, not in the notch.
-                    IslandView(model: shownIsland)
-                        .frame(width: NotchGeometry.canvasSize.width, height: 150)
-                        .allowsHitTesting(false)
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    PlacementSwitch(selection: placement).padding(12)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 150)
-                .animation(Motion.content, value: menuBarHeight)
+            // While Home is in front this *is* the island: dictations play here, not in the notch.
+            PlacementScreen(island: shownIsland, isDemo: shownIsland !== liveIsland, placement: placement)
                 .onAppear(perform: syncDemo)
                 .onChange(of: liveIsland?.geometry) { _, _ in syncDemo() }
                 .onChange(of: liveIsland?.showsIdleIsland) { _, _ in syncDemo() }
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(.white.opacity(0.08)))
             VStack(alignment: .leading, spacing: 6) {
                 Text(greeting).font(.system(size: 28, weight: .bold))
                 HStack(spacing: 7) {
@@ -319,7 +423,7 @@ private struct HomeView: View {
             ) { navigation.section = .writing }
             QuickCard(
                 icon: "pencil.tip.crop.circle", title: "Annotate",
-                detail: settings.annotateEnabled ? "⌃⌥A to record your screen for an agent" : "Off"
+                detail: settings.annotateEnabled ? "\(settings.annotateShortcut?.display ?? "Menu bar") to record your screen for an agent" : "Off"
             ) { navigation.section = .annotate }
         }
     }
@@ -339,6 +443,14 @@ private struct TryItCard: View {
     @State private var text = ""
     @FocusState private var focused: Bool
 
+    private var tryItHint: String {
+        switch settings.talkMode {
+        case .holdOrTap: return "Hold to talk, let go and it lands here. Tap once for hands-free, tap again to finish."
+        case .hold: return "Hold to talk, let go and it lands here."
+        case .toggle: return "Press once to start, press again and it lands here."
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -350,6 +462,10 @@ private struct TryItCard: View {
                 if settings.pushToTalkKeys.isEmpty {
                     Text("No push-to-talk key yet").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
                 }
+                Button("Change") { NotificationCenter.default.post(name: .showShortcuts, object: nil) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.55))
             }
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $text)
@@ -373,7 +489,7 @@ private struct TryItCard: View {
                     .strokeBorder(status.heldKey != nil ? Color.white.opacity(0.35) : Color.white.opacity(0.07))
             )
             HStack {
-                Text("Hold to talk, let go and it lands here. Tap once for hands-free, tap again to finish.")
+                Text(tryItHint)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.white.opacity(0.45))
                 Spacer()
@@ -446,36 +562,6 @@ private struct UpdateBanner: View {
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.25)))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.accentColor.opacity(0.5)))
-    }
-}
-
-/// Where the island sits, as two pills on the preview. Drawn by hand so the highlighted one is
-/// unmistakably the current setting.
-private struct PlacementSwitch: View {
-    @Binding var selection: IslandPlacement
-
-    var body: some View {
-        HStack(spacing: 2) {
-            option("In the notch", .automatic)
-            option("Below the menu bar", .belowMenuBar)
-        }
-        .padding(3)
-        .background(Capsule().fill(.black.opacity(0.55)))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
-    }
-
-    private func option(_ title: String, _ value: IslandPlacement) -> some View {
-        let selected = selection == value
-        return Button { withAnimation(Motion.content) { selection = value } } label: {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(selected ? .black : .white.opacity(0.7))
-                .padding(.horizontal, 12)
-                .frame(height: 26)
-                .background(Capsule().fill(selected ? Color.white : Color.clear))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
     }
 }
 

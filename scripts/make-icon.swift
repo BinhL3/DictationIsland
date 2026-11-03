@@ -1,8 +1,11 @@
-// Renders the app icon: the island itself (red dot + waveform) on a dark macOS squircle.
+// Renders the app icon: white audio waves on a squircle fading from black to blue.
 // Usage: swift scripts/make-icon.swift <output.iconset dir>
 import AppKit
 
 let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "build/AppIcon.iconset")
+/// "christmas" adds snowflakes behind the waves; "standard" is the plain icon.
+let theme = ProcessInfo.processInfo.environment["ICON_THEME"] ?? "christmas"
+let festive = theme == "christmas"
 try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
 func render(size: CGFloat) -> NSBitmapImageRep {
@@ -27,46 +30,67 @@ func render(size: CGFloat) -> NSBitmapImageRep {
     ctx.restoreGState()
 
     squircle.addClip()
+    // Black at the top fading to blue at the bottom.
+    NSGradient(colorsAndLocations:
+        (NSColor(calibratedRed: 0.01, green: 0.01, blue: 0.03, alpha: 1), 0.0),
+        (NSColor(calibratedRed: 0.02, green: 0.07, blue: 0.24, alpha: 1), 0.45),
+        (NSColor(calibratedRed: 0.08, green: 0.36, blue: 0.98, alpha: 1), 1.0)
+    )!.draw(in: body, angle: -90)
+
+    // A faint blue glow under the waves.
     NSGradient(colors: [
-        NSColor(calibratedRed: 0.17, green: 0.17, blue: 0.19, alpha: 1),
-        NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.06, alpha: 1),
-    ])!.draw(in: body, angle: -90)
+        NSColor(calibratedRed: 0.25, green: 0.55, blue: 1, alpha: 0.35),
+        NSColor(calibratedRed: 0.25, green: 0.55, blue: 1, alpha: 0),
+    ])!.draw(fromCenter: CGPoint(x: 512 * s, y: 470 * s), radius: 0,
+             toCenter: CGPoint(x: 512 * s, y: 470 * s), radius: 380 * s, options: [])
 
-    // Soft glow behind the island.
-    let glow = NSGradient(colors: [
-        NSColor(calibratedRed: 1, green: 0.3, blue: 0.25, alpha: 0.22),
-        NSColor(calibratedRed: 1, green: 0.3, blue: 0.25, alpha: 0),
-    ])!
-    glow.draw(fromCenter: CGPoint(x: 512 * s, y: 512 * s), radius: 0,
-              toCenter: CGPoint(x: 512 * s, y: 512 * s), radius: 420 * s, options: [])
+    if festive {
+        // Snowflakes behind the waves: six arms with little side branches, in the open space.
+        let flakes: [(x: CGFloat, y: CGFloat, size: CGFloat, alpha: CGFloat)] = [
+            (190, 820, 46, 0.85), (330, 760, 26, 0.6), (560, 860, 30, 0.7), (735, 800, 40, 0.8),
+            (860, 700, 24, 0.55), (165, 600, 22, 0.5), (882, 430, 30, 0.7), (160, 330, 34, 0.7),
+            (300, 200, 28, 0.6), (470, 165, 22, 0.5), (650, 215, 36, 0.75), (820, 250, 24, 0.55),
+            (125, 470, 16, 0.4),
+        ]
+        for flake in flakes {
+            let path = NSBezierPath()
+            let arm = flake.size * s, center = CGPoint(x: flake.x * s, y: flake.y * s)
+            for i in 0..<6 {
+                let angle = CGFloat(i) * .pi / 3 + .pi / 2
+                let tip = CGPoint(x: center.x + arm * cos(angle), y: center.y + arm * sin(angle))
+                path.move(to: center)
+                path.line(to: tip)
+                // Two short branches two-thirds of the way out.
+                let mid = CGPoint(x: center.x + arm * 0.62 * cos(angle), y: center.y + arm * 0.62 * sin(angle))
+                for side in [-1.0, 1.0] as [CGFloat] {
+                    let branch = angle + side * .pi / 4
+                    path.move(to: mid)
+                    path.line(to: CGPoint(x: mid.x + arm * 0.32 * cos(branch), y: mid.y + arm * 0.32 * sin(branch)))
+                }
+            }
+            path.lineWidth = max(1, flake.size * 0.13 * s)
+            path.lineCapStyle = .round
+            NSColor.white.withAlphaComponent(flake.alpha).setStroke()
+            path.stroke()
+        }
+    }
 
-    // The island: a black capsule with a hairline edge.
-    let island = CGRect(x: 212 * s, y: 432 * s, width: 600 * s, height: 160 * s)
-    let capsule = NSBezierPath(roundedRect: island, xRadius: 80 * s, yRadius: 80 * s)
-    NSColor.black.setFill()
-    capsule.fill()
-    NSColor.white.withAlphaComponent(0.12).setStroke()
-    capsule.lineWidth = 3 * s
-    capsule.stroke()
-
-    // Recording dot (concentric with the capsule's left end).
-    let dot = CGRect(x: (292 - 30) * s, y: (512 - 30) * s, width: 60 * s, height: 60 * s)
+    // Audio waves: rounded bars with an uneven, speech-like rhythm (not a symmetric pyramid).
+    // Few and thick so they still read at 16 px.
+    let heights: [CGFloat] = [170, 390, 250, 610, 330, 480, 200]
+    let barWidth: CGFloat = 62, gap: CGFloat = 34
+    let total = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
+    var x = (512 - total / 2) * s
     ctx.saveGState()
-    ctx.setShadow(offset: .zero, blur: 30 * s, color: NSColor(calibratedRed: 1, green: 0.27, blue: 0.23, alpha: 0.9).cgColor)
-    NSColor(calibratedRed: 1, green: 0.27, blue: 0.23, alpha: 1).setFill()
-    NSBezierPath(ovalIn: dot).fill()
-    ctx.restoreGState()
-
-    // Waveform bars.
-    let heights: [CGFloat] = [44, 84, 64, 104, 56, 76]
-    let barWidth: CGFloat = 22, gap: CGFloat = 18
-    var x = (732 - (CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap)) * s
-    NSColor.white.setFill()
+    ctx.setShadow(offset: .zero, blur: 36 * s, color: NSColor(calibratedRed: 0.35, green: 0.65, blue: 1, alpha: 0.8).cgColor)
     for h in heights {
         let bar = CGRect(x: x, y: (512 - h / 2) * s, width: barWidth * s, height: h * s)
-        NSBezierPath(roundedRect: bar, xRadius: barWidth / 2 * s, yRadius: barWidth / 2 * s).fill()
+        let path = NSBezierPath(roundedRect: bar, xRadius: barWidth / 2 * s, yRadius: barWidth / 2 * s)
+        NSGradient(colors: [NSColor.white, NSColor(calibratedRed: 0.82, green: 0.9, blue: 1, alpha: 1)])!
+            .draw(in: path, angle: -90)
         x += (barWidth + gap) * s
     }
+    ctx.restoreGState()
 
     NSGraphicsContext.restoreGraphicsState()
     return rep

@@ -5,12 +5,17 @@ import FoundationModels
 /// What happens to a finished take before it's pasted:
 /// spoken commands → the Words list → (optionally) a rewrite in the user's style.
 enum TextPipeline {
-    @MainActor static func process(_ raw: String, settings: AppSettings) async -> String {
+    @MainActor static func process(_ raw: String, settings: AppSettings, context: WritingContext? = nil) async -> String {
         var text = raw
         if settings.spokenFormatting { text = SpokenFormatter.apply(to: text) }
         text = settings.corrections.apply(to: text)
-        if settings.styleRewrite, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            text = await StyleRewriter.rewrite(text, instructions: settings.styleInstructions)
+        // Terminals get exactly what was said: a "tidied" command is a wrong command.
+        let tidy = settings.styleRewrite && context?.kind != .terminal
+        if tidy, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            text = await StyleRewriter.rewrite(
+                text, instructions: settings.styleInstructions,
+                context: settings.adaptToApp ? context : nil
+            )
             // The model may respell names; the Words list has the last word.
             text = settings.corrections.apply(to: text)
         }
@@ -28,9 +33,12 @@ enum SpokenFormatter {
         // pattern eats the punctuation and spaces on both sides.
         // Before a command only spaces and commas go, so "…today. New paragraph" keeps its period.
         let before = "[\\s,]*", after = "[\\s,.;:!?]*"
-        result = replace("\(before)\\bnew paragraph\\b\(after)", in: result, with: "\n\n")
-        result = replace("\(before)\\bnew line\\b\(after)", in: result, with: "\n")
-        result = replace("\(before)\\b(?:bullet point|next bullet|new bullet)\\b\(after)", in: result, with: "\n• ")
+        // Talking *about* a list isn't a command: "the bullet point stuff", "a new line of code".
+        // Recognizers like Bark don't punctuate, so position alone can't tell; the word before can.
+        let notAfter = "(?<!\\b(?:the|a|an|this|that|these|those|my|your|our|their|his|her|its|with|about|of|like|each|every|one|another)\\s)"
+        result = replace("\(before)\(notAfter)\\bnew paragraph\\b\(after)", in: result, with: "\n\n")
+        result = replace("\(before)\(notAfter)\\bnew line\\b\(after)", in: result, with: "\n")
+        result = replace("\(before)\(notAfter)\\b(?:bullet point|next bullet|new bullet)\\b\(after)", in: result, with: "\n• ")
         guard result != text else { return text }
         // Tidy: no blank bullets, no leading newlines, each line starts with a capital.
         let lines = result.components(separatedBy: "\n").map { line -> String in
@@ -91,6 +99,7 @@ enum StyleRewriter {
         - Fix capitalization, punctuation and obvious grammar slips.
         - Use bullet points ("• ") only when the transcript lists three or more separate tasks or items, or already has them.
         - Keep existing line breaks.
+        Sometimes a <context> block comes first. Use it only to pick the tone, and to continue smoothly from the text already written (if that ends mid-sentence, don't start with a capital). Never copy anything from the context into your answer.
         Output only the edited text.
 
         Example
@@ -134,21 +143,75 @@ enum StyleRewriter {
         return LanguageModelSession(instructions: instructions(style: style.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
-    @MainActor static func rewrite(_ text: String, instructions style: String) async -> String {
+    /// - Parameters:
+    ///   - context: where the text is going; it goes in the prompt rather than the instructions,
+    ///     so the session warmed at key-down still applies.
+    ///   - always: "Fix that" rewrites even short takes.
+    @MainActor static func rewrite(_ text: String, instructions style: String, context: WritingContext? = nil, always: Bool = false, timeout: Duration? = nil) async -> String {
         guard availability == nil else { return text }
-        guard text.split(whereSeparator: \.isWhitespace).count >= minimumWords else { return text }
+        guard always || text.split(whereSeparator: \.isWhitespace).count >= minimumWords else { return text }
         let session = takeSession(style: style)
+        let prompt = (context?.promptLines ?? "") + "Transcript: \(text)\nEdited:"
         final class Box: @unchecked Sendable { var text: String? }
         let box = Box()
-        let finished = await withDeadline(timeout) {
-            box.text = try? await session.respond(to: "Transcript: \(text)\nEdited:", options: GenerationOptions(temperature: 0)).content
+        let finished = await withDeadline(timeout ?? Self.timeout) {
+            box.text = try? await session.respond(to: prompt, options: GenerationOptions(temperature: 0)).content
         }
         guard finished, let raw = box.text else { return text }
-        let result = raw.components(separatedBy: "\n")
+        var result = raw.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Belt and braces: drop any leaked context lines, then any restated field text.
+        result = result.components(separatedBy: "\n")
+            .filter { line in !["<context", "</context", "App:", "Kind:", "Already written"].contains { line.hasPrefix($0) } }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let before = context?.textBeforeCursor { result = strippingRepeat(of: before, from: result) }
         return isPlausibleEdit(of: text, result) ? result : text
+    }
+
+    /// The model tends to restate the text already in the field ("Hi Daniel," again) before its
+    /// edit, even when told not to. Drop the longest start of the result that is an end of that
+    /// text (ignoring case, spacing and line breaks).
+    static func strippingRepeat(of before: String, from result: String) -> String {
+        func normalized(_ s: String) -> String {
+            s.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        let tail = normalized(before)
+        guard !tail.isEmpty else { return result }
+        // Walk word boundaries of the result; keep the longest prefix that the field ends with.
+        var cut: String.Index?
+        var index = result.startIndex
+        while index < result.endIndex {
+            guard let next = result[index...].firstIndex(where: \.isWhitespace) ?? Optional(result.endIndex) else { break }
+            let prefix = normalized(String(result[..<next]))
+            if prefix.count >= 3, tail.hasSuffix(prefix) { cut = next }
+            if prefix.count > tail.count { break }
+            index = next == result.endIndex ? next : result.index(after: next)
+        }
+        var rest = cut.map { result[$0...].trimmingCharacters(in: .whitespacesAndNewlines) } ?? result
+        // The model may also restate it with new punctuation ("…green and" → "…green."): drop
+        // opening sentences whose words already appear, in order, in the field.
+        func words(_ s: Substring) -> [String] {
+            s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        }
+        let field = words(Substring(before)).joined(separator: " ")
+        while let end = rest.firstIndex(where: { ".!?".contains($0) }) {
+            let sentence = words(rest[...end])
+            guard sentence.count >= 3, field.contains(sentence.joined(separator: " ")) else { break }
+            let remainder = rest[rest.index(after: end)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remainder.isEmpty else { break }
+            rest = remainder
+        }
+        if rest.isEmpty { return result }
+        // Continuing a sentence that's still open: no capital (except "I").
+        // (Only spaces are trimmed: a field ending in a line break starts a fresh line.)
+        if let last = before.trimmingCharacters(in: .whitespaces).last, !".!?:\n".contains(last),
+           let first = rest.first, first.isUppercase, !rest.hasPrefix("I ") {
+            rest = first.lowercased() + rest.dropFirst()
+        }
+        return rest
     }
 
     /// Guards against the model dropping most of the text or writing its own: an edit keeps

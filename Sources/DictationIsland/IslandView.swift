@@ -4,6 +4,11 @@ import SwiftUI
 /// the top edge whose size and radii are derived from `IslandModel.presentation`.
 struct IslandView: View {
     @Bindable var model: IslandModel
+    @Environment(\.islandPillness) private var pillnessOverride
+
+    private var pillness: CGFloat {
+        pillnessOverride ?? (model.geometry.style == .pill ? 1 : 0)
+    }
 
     var body: some View {
         let size = model.islandSize
@@ -11,11 +16,11 @@ struct IslandView: View {
 
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                NotchShape(style: model.geometry.style, topCornerRadius: radii.top, bottomCornerRadius: radii.bottom)
+                NotchShape(pillness: pillness, topCornerRadius: radii.top, bottomCornerRadius: radii.bottom)
                     .fill(.black)
                 content
                     .frame(width: size.width, height: size.height, alignment: .top)
-                    .clipShape(NotchShape(style: model.geometry.style, topCornerRadius: radii.top, bottomCornerRadius: radii.bottom))
+                    .clipShape(NotchShape(pillness: pillness, topCornerRadius: radii.top, bottomCornerRadius: radii.bottom))
             }
             .frame(width: size.width, height: size.height)
             .shadow(color: .black.opacity(model.presentation == .closed ? 0 : 0.35), radius: 12, y: 4)
@@ -30,8 +35,9 @@ struct IslandView: View {
             // Expanded has explicit buttons; elsewhere a click toggles dictation.
             .onTapGesture { if model.presentation != .expanded { model.toggle() } }
         }
-        .padding(.top, model.geometry.topInset)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.top, model.geometry.edge == .top ? model.geometry.topInset : 0)
+        .padding(.bottom, model.geometry.edge == .bottom ? model.geometry.bottomInset : 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: model.geometry.edge == .top ? .top : .bottom)
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
     }
@@ -113,7 +119,17 @@ struct IslandView: View {
     private var statusGlyph: some View {
         switch model.phase {
         case .listening:
-            RecordingDot(meter: model.meter, simulated: model.simulatesAudio)
+            if let emoji = model.laughingEmoji {
+                Text(emoji).font(.system(size: 13)).transition(.scale.combined(with: .opacity))
+            } else if model.hearsComputer {
+                // Hearing the Mac's audio too.
+                Image(systemName: "speaker.wave.2.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .transition(.scale.combined(with: .opacity))
+            } else {
+                RecordingDot(meter: model.meter, simulated: model.simulatesAudio)
+            }
         case .finishing, .preparing:
             Spinner()
         case .done(let result):
@@ -143,12 +159,15 @@ struct IslandView: View {
                 .foregroundStyle(.white.opacity(0.8))
                 .contentTransition(.numericText())
         case .done:
-            // Notch only (pill uses `MessageRow`): the label goes in the trailing wing.
-            Text(model.messageText ?? "")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .fixedSize()
-                .transition(.blurFade)
+            // The label goes in the trailing wing (a pill uses `MessageRow` instead). Nothing
+            // heard has no label: the crossed-out mic on the left says it.
+            if let label = model.messageText {
+                Text(label)
+                    .font(Font(Metrics.wingLabelFont))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .fixedSize()
+                    .transition(.blurFade)
+            }
         default:
             EmptyView()
         }
@@ -163,7 +182,7 @@ struct IslandView: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            LiveTranscriptLine(text: model.transcript, isFinishing: model.phase == .finishing)
+            LiveTranscriptLine(words: model.liveWords, isFinishing: model.phase == .finishing)
         }
     }
 }
@@ -237,26 +256,26 @@ private struct ElapsedTime: View {
 /// Single line that keeps the newest words visible. Text starts leading-aligned; once it overflows
 /// it pins to the trailing edge and fades out on the left with a gradient mask.
 struct LiveTranscriptLine: View {
-    let text: String
+    /// The line only ever shows the end of the transcript.
+    static let maxWords = 40
+
+    let words: [LiveWord]
     var isFinishing: Bool
     @State private var contentWidth: CGFloat = 0
-
-    /// Words keyed by absolute position so trimming old words never re-animates the rest.
-    private var words: [(index: Int, word: String)] {
-        let all = text.split(separator: " ").map(String.init)
-        return Array(all.enumerated().map { ($0.offset, $0.element) }.suffix(40))
-    }
 
     var body: some View {
         GeometryReader { geo in
             let overflows = contentWidth > geo.size.width
             HStack(spacing: 4) {
-                ForEach(words, id: \.index) { item in
-                    Text(item.word).transition(.wordIn)
+                // Keyed by word identity, so revisions never re-animate the words around them.
+                ForEach(words.suffix(Self.maxWords)) { word in
+                    Text(word.text)
+                        .foregroundStyle(LiveEditStyle.color(word.mark, base: .white.opacity(isFinishing ? 0.6 : 0.92)))
+                        .strikethrough(word.mark == .dropped, color: LiveEditStyle.dropped)
+                        .transition(.wordIn)
                 }
             }
             .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.white.opacity(isFinishing ? 0.6 : 0.92))
             .fixedSize()
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { contentWidth = $0 }
             .frame(width: geo.size.width, height: geo.size.height, alignment: overflows ? .trailing : .leading)
@@ -277,6 +296,41 @@ struct LiveTranscriptLine: View {
     }
 }
 
+/// Live edits' colours: refined words green, dropped ones red and struck through.
+enum LiveEditStyle {
+    static let fixed = Color(red: 0.36, green: 0.88, blue: 0.52)
+    static let dropped = Color(red: 1, green: 0.4, blue: 0.38)
+
+    static func color(_ mark: LiveWord.Mark, base: Color) -> Color {
+        switch mark {
+        case .plain: return base
+        case .fixed: return fixed
+        case .dropped: return dropped.opacity(0.85)
+        }
+    }
+
+    /// The end of the transcript (about `limit` characters) as styled text.
+    static func attributed(_ words: [LiveWord], base: Color, limit: Int = 260) -> AttributedString {
+        var shown: [LiveWord] = []
+        var length = 0
+        for word in words.reversed() {
+            if length + word.text.count > limit, !shown.isEmpty { break }
+            shown.append(word)
+            length += word.text.count + 1
+        }
+        var result = AttributedString(shown.count < words.count ? "… " : "")
+        for (n, word) in shown.reversed().enumerated() {
+            var piece = AttributedString((n == 0 ? "" : " ") + word.text)
+            piece.swiftUI.foregroundColor = color(word.mark, base: base)
+            if word.mark == .dropped {
+                piece.swiftUI.strikethroughStyle = Text.LineStyle(pattern: .solid, color: dropped)
+            }
+            result += piece
+        }
+        return result
+    }
+}
+
 /// Hover state: the full transcript plus explicit controls. Text shares the header's inset;
 /// the footer controls are inset by `controlInset` to sit concentric with the bottom corners.
 struct ExpandedBody: View {
@@ -289,9 +343,9 @@ struct ExpandedBody: View {
                 if case .error(let message) = model.phase {
                     Text(message).foregroundStyle(.orange)
                 } else if model.transcript.isEmpty {
-                    Text("Listening…").foregroundStyle(.white.opacity(0.4))
+                    Text(model.placeholder).foregroundStyle(.white.opacity(0.4))
                 } else {
-                    Text(tail(of: model.transcript)).foregroundStyle(.white.opacity(0.92))
+                    Text(LiveEditStyle.attributed(model.liveWords, base: .white.opacity(0.92)))
                 }
             }
             .font(Font(Metrics.transcriptFont))
@@ -326,7 +380,7 @@ struct ExpandedBody: View {
     private var hint: String {
         switch model.phase {
         case .listening: return finishHint
-        case .finishing: return "Transcribing…"
+        case .finishing: return model.finishingLabel + "…"
         case .done(.pasted): return "Pasted into the active app"
         case .done(.copied): return "Copied · grant Accessibility to auto-paste"
         case .done(.empty): return "Nothing was heard"
@@ -339,9 +393,6 @@ struct ExpandedBody: View {
         return model.settings.fallbackShortcutEnabled ? "Press \(HotKey.symbol) to finish" : "Click Done to finish"
     }
 
-    private func tail(of text: String) -> String {
-        text.count > 260 ? "…" + text.suffix(260) : text
-    }
 }
 
 struct IslandButton: View {

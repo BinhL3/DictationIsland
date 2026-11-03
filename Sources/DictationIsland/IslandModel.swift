@@ -38,7 +38,21 @@ enum Presentation: Equatable {
 @Observable
 final class IslandModel {
     private(set) var phase: DictationPhase = .idle
-    private(set) var transcript = ""
+    private(set) var transcript = "" {
+        didSet { syncWords() }
+    }
+    /// `transcript` as words to draw, with live-edit marks (see `LiveWordTrack`).
+    private(set) var liveWords: [LiveWord] = []
+    @ObservationIgnored private var wordTrack = LiveWordTrack()
+    /// Set just before a `transcript` change that should show its edits.
+    @ObservationIgnored private var markNextChange = false
+    @ObservationIgnored private var nextCorrections = LiveWordTrack.Corrections.none
+    @ObservationIgnored private var pruneTask: Task<Void, Never>?
+    /// Keeps marks on screen (`--state edits`, for screenshots).
+    @ObservationIgnored private var freezesMarks = false
+    /// The finished text changed words on screen (the clean-up, Fix that): the done state keeps
+    /// the transcript line open for a moment to show them.
+    private(set) var showsFinalEdits = false
     /// Drives the elapsed timer; `listeningEndedAt` freezes it while transcribing.
     private(set) var listeningStartedAt: Date?
     private(set) var listeningEndedAt: Date?
@@ -91,6 +105,30 @@ final class IslandModel {
     @ObservationIgnored private var isCaptureRunning = false
     /// Capturing on key-down but not shown yet; see `arm()`.
     @ObservationIgnored private(set) var isArmed = false
+    /// Replaces "Transcribing" while finishing ("Fixing" for Fix that).
+    private(set) var finishingLabel = "Transcribing"
+    /// Replaces "Pasted" on the result ("Fixed").
+    private(set) var doneLabel: String?
+    /// What the last dictation pasted, for "Fix that".
+    private struct LastDelivery {
+        var text: String
+        var context: WritingContext?
+        /// The take's audio and the engine that heard it, so Fix that can listen again.
+        var recording: TakeRecording?
+        var engine: SpeechEngine?
+        var pasted: Bool
+        /// `AppStatus.inputRevision` right after the paste; if it moved, the person has typed
+        /// or clicked since and an undo would take back their work, not ours.
+        var inputRevision: Int
+    }
+    @ObservationIgnored private var lastDelivery: LastDelivery?
+    /// The take is also hearing the computer's audio (toggled with its shortcut mid-dictation).
+    private(set) var hearsComputer = false
+    @ObservationIgnored private var computerAudio: ComputerAudioSlot?
+    @ObservationIgnored private var takeRecording: TakeRecording?
+    /// The emoji for a laugh heard right now; the island's dot shows it instead.
+    private(set) var laughingEmoji: String?
+    @ObservationIgnored private var laughDetector: LaughDetector?
     /// Engine actually used for the current/last session, for display.
     private(set) var activeEngine: SpeechEngine?
 
@@ -106,6 +144,9 @@ final class IslandModel {
         case .idle: return .closed
         case .preparing: return isPill ? .message : .compact
         case .error: return isHovering ? .expanded : (isPill ? .message : .peek)
+        // Nothing was heard: just the crossed-out mic, no words and no panel on hover.
+        case .done(.empty): return .compact
+        case .done where showsFinalEdits: return isHovering ? .expanded : .peek
         case .done: return isHovering ? .expanded : (isPill ? .message : .compact)
         case .listening, .finishing:
             if isHovering { return .expanded }
@@ -116,11 +157,20 @@ final class IslandModel {
     /// Text for the `.message` row and for notch-style done/error states.
     var messageText: String? {
         switch phase {
-        case .done(.pasted): return "Pasted"
-        case .done(.copied): return "Copied to clipboard"
-        case .done(.empty): return "No speech detected"
+        case .done(.pasted): return doneLabel ?? "Pasted"
+        case .done(.copied): return doneLabel ?? "Copied to clipboard"
+        case .done(.empty): return nil
         case .preparing(let fraction): return "Downloading speech model · \(Int(fraction * 100))%"
         case .error(let message): return message
+        default: return nil
+        }
+    }
+
+    /// Text the notch layout puts in the right wing, if any (see `IslandView.trailingWing`).
+    var trailingLabel: String? {
+        switch phase {
+        case .done: return messageText
+        case .preparing(let fraction): return "\(Int(fraction * 100))%"
         default: return nil
         }
     }
@@ -148,6 +198,8 @@ final class IslandModel {
         static let transcriptLineSpacing: CGFloat = 3
         static let maxTranscriptLines = 4
         static let messageFont = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+        /// The notch's right-wing label ("Pasted", "No speech detected", "42%").
+        static let wingLabelFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
 
         static var leadingWingWidth: CGFloat { glyphSize + glyphSpacing + timerWidth }
     }
@@ -173,9 +225,19 @@ final class IslandModel {
         switch geometry.style {
         case .notch:
             // Both wings get the wider wing's width so the camera stays centred between them.
-            let wing = Metrics.contentInset + Metrics.leadingWingWidth + 8
+            // A label like "No speech detected" goes in the right wing, so that wing (and its
+            // twin) grows to fit it; otherwise it would slide under the camera housing, which
+            // screenshots don't show but your eyes do.
+            var wing = Metrics.contentInset + Metrics.leadingWingWidth + 8
+            // Nothing heard is just the crossed-out mic: a slim island that hugs it.
+            if phase == .done(.empty) { wing = Metrics.contentInset + Metrics.glyphSize + 8 }
+            if let label = trailingLabel {
+                let width = ceil((label as NSString).size(withAttributes: [.font: Metrics.wingLabelFont]).width)
+                wing = max(wing, Metrics.contentInset + width + 10)
+            }
             return geometry.closedSize.width + 2 * (wing + cornerRadii.top)
         case .pill:
+            if phase == .done(.empty) { return 2 * Metrics.contentInset + Metrics.glyphSize + 16 }
             return 2 * Metrics.contentInset + wings + Metrics.wingGap
         }
     }
@@ -211,7 +273,7 @@ final class IslandModel {
         let text: String
         switch phase {
         case .error(let message): text = message
-        default: text = transcript.isEmpty ? "Listening…" : transcript
+        default: text = transcript.isEmpty ? placeholder : transcript
         }
         let textWidth = width - 2 * horizontalInset
         let lineHeight = ceil(Metrics.transcriptFont.ascender - Metrics.transcriptFont.descender + Metrics.transcriptFont.leading)
@@ -224,6 +286,11 @@ final class IslandModel {
         let textHeight = CGFloat(lines) * lineHeight + CGFloat(lines - 1) * Metrics.transcriptLineSpacing
         // top 2 + text + gap 10 + controls + bottom inset
         return 2 + textHeight + 10 + Metrics.controlHeight + Metrics.controlInset
+    }
+
+    /// What the expanded panel says before there's any text.
+    var placeholder: String {
+        phase == .finishing ? finishingLabel + "…" : "Listening…"
     }
 
     var cornerRadii: (top: CGFloat, bottom: CGFloat) {
@@ -310,6 +377,8 @@ final class IslandModel {
 
     /// Puts the current take on the island.
     private func reveal(_ newPhase: DictationPhase) {
+        finishingLabel = "Transcribing"
+        doneLabel = nil
         shownTake = generation
         transcript = activePartial
         setPhase(newPhase)
@@ -323,6 +392,19 @@ final class IslandModel {
         isCapturing = true
         isCaptureRunning = false
         activePartial = ""
+        let laughs = settings.laughEmoji && !simulatesAudio ? LaughDetector() : nil
+        laughs?.onLaughing = { [weak self] emoji in
+            MainActor.assumeIsolated {
+                guard let self, session == self.shownTake, self.phase == .listening else { return }
+                withAnimation(Motion.content) { self.laughingEmoji = emoji }
+            }
+        }
+        laughDetector = laughs
+        let computer = ComputerAudioSlot()
+        computerAudio = computer
+        let recording = TakeRecording()
+        takeRecording = recording
+        hearsComputer = false
         if settings.styleRewrite { StyleRewriter.prepare(style: settings.styleInstructions) }
         Task {
             // Each await can outlive the session (a disarm or cancel meanwhile).
@@ -365,7 +447,10 @@ final class IslandModel {
             activeEngine = resolution.engine
             do {
                 try audio.start(deviceUID: settings.resolvedMicrophoneUID, channel: settings.inputChannel) { buffer in
+                    computer.mix(into: buffer)
+                    recording.append(buffer)
                     gate.push(buffer)
+                    laughs?.append(buffer)
                 }
             } catch {
                 return failSession(session, error.localizedDescription)
@@ -392,9 +477,18 @@ final class IslandModel {
         // The island and media react at the release; only the mic keeps going for the tail.
         setPhase(.finishing)
         if simulatesAudio { return }
+        SoundCues.play(.stop)
         let take = generation
         let spoken = listeningStartedAt.map { Date().timeIntervalSince($0) }
         let transcriber = self.transcriber, setup = sessionSetup, fallback = activePartial
+        let laughs = laughDetector
+        laughDetector = nil
+        laughingEmoji = nil
+        let computer = computerAudio
+        computerAudio = nil
+        hearsComputer = false
+        let recording = takeRecording, engine = activeEngine
+        takeRecording = nil
         self.transcriber = nil
         gate = nil
         sessionSetup = nil
@@ -403,17 +497,32 @@ final class IslandModel {
         startTail(for: take)
 
         let tail = self.tail, previous = outputChain
+        // The computer's audio keeps flowing through the release tail, then stops.
+        Task { await tail?.value; computer?.set(nil) }
         outputChain = Task { [weak self] in
             await tail?.value
+            // Where the text is going (app, window, text before the cursor), read off the main
+            // thread with a short timeout. Used by the tidy-up and by Fix that.
+            let context = await Task.detached { WritingContext.captureFocused() }.value
             var text = ""
             if await setup?.value == true, let transcriber {
                 text = await Self.finish(transcriber, fallback: fallback)
             }
             // Formatting and the style rewrite run alongside earlier takes' pastes; only the
             // paste itself waits its turn.
-            if let settings = self?.settings { text = await TextPipeline.process(text, settings: settings) }
+            if let settings = self?.settings { text = await TextPipeline.process(text, settings: settings, context: context) }
+            // After the rewrite, so the tidy-up can't drop the emoji. A take that was only a laugh
+            // has no words (recognizers don't write laughter down), so the laugh is the message.
+            if let laughs {
+                let found = await laughs.finish()
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    text = found.map(\.emoji).joined()
+                } else {
+                    text = LaughDetector.insert(found, into: text, duration: spoken ?? 0)
+                }
+            }
             await previous?.value
-            self?.deliver(text, take: take, seconds: spoken)
+            self?.deliver(text, take: take, seconds: spoken, context: context, recording: recording, engine: engine)
         }
     }
 
@@ -426,14 +535,21 @@ final class IslandModel {
 
     /// Records and pastes one finished take. Only the take on the island changes the island; an
     /// earlier take finishing behind a newer one pastes without showing anything.
-    private func deliver(_ text: String, take: Int, seconds: Double?) {
+    private func deliver(_ text: String, take: Int, seconds: Double?, context: WritingContext?, recording: TakeRecording?, engine: SpeechEngine?) {
         if cancelledTakes.remove(take) != nil { return }
         settings.record(text, seconds: seconds)
         let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
+        if result != .empty {
+            lastDelivery = LastDelivery(
+                text: text, context: context, recording: recording, engine: engine,
+                pasted: result == .pasted, inputRevision: AppStatus.shared.inputRevision
+            )
+        }
         guard take == shownTake, phase == .finishing else { return }
-        transcript = text
+        if result != .empty { SoundCues.play(.done) }
+        showFinal(text)
         setPhase(.done(result))
-        scheduleDismiss(after: 1.4)
+        scheduleDismiss(after: showsFinalEdits ? 2.2 : 1.4)
     }
 
     private func startTail(for take: Int) {
@@ -452,6 +568,97 @@ final class IslandModel {
         tailTake = nil
         tail?.cancel()
         audio.stop()
+    }
+
+    // MARK: Computer audio
+
+    /// Mid-dictation: start or stop mixing what the Mac is playing into this take. Ignored when
+    /// not dictating, so a stray tap of the key does nothing.
+    func toggleComputerAudio() {
+        guard phase == .listening, let slot = computerAudio else { return }
+        if slot.isOn {
+            slot.set(nil)
+            withAnimation(Motion.content) { hearsComputer = false }
+            return
+        }
+        guard SystemAudioPermission.status == .authorized else {
+            // First time: macOS asks; the next tap works once it's allowed.
+            SystemAudioPermission.request()
+            return
+        }
+        guard let capture = SystemAudioCapture() else { return }
+        slot.set(capture)
+        // You're capturing it, so you should hear it: no muffle for the rest of this take.
+        MediaMuffler.shared.release()
+        withAnimation(Motion.content) { hearsComputer = true }
+    }
+
+    // MARK: Fix that
+
+    /// Fixes the last dictation. First it listens again: the same audio through a *different*
+    /// engine (a misheard word can't be fixed from the text alone). Then Apple Intelligence tidies
+    /// the result. The new version replaces the old one in place; if the person has typed or
+    /// clicked since (or switched apps), undoing would take back their work, so it's copied.
+    func fixLast() {
+        switch phase {
+        case .idle, .done, .error: break
+        default: return
+        }
+        guard let last = lastDelivery else { return fail("Nothing to fix yet") }
+        if last.recording == nil, StyleRewriter.availability != nil {
+            return fail("Turn on Apple Intelligence to fix dictations")
+        }
+        dismissTask?.cancel()
+        shownTake = -1
+        finishingLabel = "Fixing"
+        doneLabel = nil
+        transcript = last.text
+        listeningStartedAt = Date()
+        listeningEndedAt = listeningStartedAt
+        setPhase(.finishing)
+        Task {
+            var candidate = last.text
+            if let recording = last.recording {
+                let audio = recording.audio
+                if let second = await SecondOpinion.transcribe(audio.samples, sampleRate: audio.sampleRate, firstEngine: last.engine, locale: settings.locale) {
+                    candidate = second.text
+                    if settings.spokenFormatting { candidate = SpokenFormatter.apply(to: candidate) }
+                    candidate = settings.corrections.apply(to: candidate)
+                }
+            }
+            if StyleRewriter.availability == nil {
+                // The person asked and is watching: allow a cold model time to load.
+                candidate = await StyleRewriter.rewrite(candidate, instructions: settings.styleInstructions, context: last.context, always: true, timeout: .seconds(10))
+                candidate = settings.corrections.apply(to: candidate)
+            }
+            guard phase == .finishing, finishingLabel == "Fixing" else { return }
+            if candidate == last.text {
+                doneLabel = "No better version"
+                setPhase(.done(.pasted))
+                return scheduleDismiss(after: 1.6)
+            }
+            let fixed = candidate
+            let sameApp = last.context.map { $0.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier } ?? true
+            let untouched = last.pasted && sameApp && AppStatus.shared.inputRevision == last.inputRevision
+            let result: InsertResult
+            if untouched {
+                TextInserter.undo()
+                try? await Task.sleep(for: .milliseconds(120))
+                result = TextInserter.insert(fixed, autoPaste: true)
+            } else {
+                result = TextInserter.insert(fixed, autoPaste: false)
+            }
+            settings.replaceLatest(with: fixed)
+            var updated = last
+            updated.text = fixed
+            updated.pasted = result == .pasted
+            updated.inputRevision = AppStatus.shared.inputRevision
+            lastDelivery = updated
+            showFinal(fixed)
+            doneLabel = result == .pasted ? "Fixed" : "Fixed · copied"
+            setPhase(.done(result))
+            scheduleDismiss(after: showsFinalEdits ? 2.4 : 1.6)
+        }
     }
 
     /// Gets the next dictation ready to start quickly: builds the mic engine for the current input
@@ -485,6 +692,12 @@ final class IslandModel {
         audio.stop()
         transcriber?.cancel()
         transcriber = nil
+        laughDetector = nil
+        laughingEmoji = nil
+        computerAudio?.set(nil)
+        computerAudio = nil
+        takeRecording = nil
+        hearsComputer = false
         gate = nil
         sessionSetup = nil
     }
@@ -511,17 +724,24 @@ final class IslandModel {
             analyzer.contextualStrings = hints
             transcriber = analyzer
         }
-        transcriber.onPartial = { [weak self] text in
+        transcriber.onPartial = { [weak self] heard in
             guard let self else { return }
-            let text = self.settings.corrections.apply(to: text)
+            let text = self.settings.corrections.apply(to: heard)
             if take == self.generation { self.activePartial = text }
             guard take == self.shownTake, self.phase == .listening || self.phase == .finishing else { return }
+            if self.settings.liveEdits {
+                self.markNextChange = true
+                if text != heard {
+                    self.nextCorrections = LiveWordTrack.corrections(raw: LiveWordTrack.split(heard), corrected: LiveWordTrack.split(text))
+                }
+            }
             withAnimation(Motion.content) { self.transcript = text }
         }
         return transcriber
     }
 
     private func fail(_ message: String) {
+        if !simulatesAudio { SoundCues.play(.error) }
         setPhase(.error(message))
         withAnimation(.linear(duration: 0.4)) { shakeTrigger += 1 }
         scheduleDismiss(after: 2.5)
@@ -537,11 +757,47 @@ final class IslandModel {
         }
     }
 
+    /// The finished text replaces the live one, showing what changed when live edits are on.
+    private func showFinal(_ text: String) {
+        markNextChange = settings.liveEdits
+        withAnimation(Motion.content) { transcript = text }
+        // Only worth holding the line open if a change is in the part it shows.
+        showsFinalEdits = settings.liveEdits && wordTrack.words.suffix(LiveTranscriptLine.maxWords).contains { $0.mark != .plain }
+    }
+
+    /// Keeps `liveWords` in step with `transcript`.
+    private func syncWords() {
+        let mark = markNextChange && settings.liveEdits
+        wordTrack.update(to: LiveWordTrack.split(transcript), mark: mark, corrections: mark ? nextCorrections : .none)
+        markNextChange = false
+        nextCorrections = .none
+        liveWords = wordTrack.words
+        schedulePrune()
+    }
+
+    /// Fades marks out when their time is up.
+    private func schedulePrune() {
+        pruneTask?.cancel()
+        guard !freezesMarks, let next = wordTrack.nextExpiry else { return }
+        pruneTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0.05, next.timeIntervalSinceNow)))
+            guard !Task.isCancelled, let self else { return }
+            if self.wordTrack.prune() {
+                withAnimation(Motion.content) { self.liveWords = self.wordTrack.words }
+            }
+            self.schedulePrune()
+        }
+    }
+
     private func setPhase(_ newPhase: DictationPhase) {
+        if case .done = newPhase {} else { showsFinalEdits = false }
         if newPhase == .listening {
             listeningStartedAt = Date()
             listeningEndedAt = nil
-            if !simulatesAudio { MediaMuffler.shared.engage() }
+            if !simulatesAudio {
+                SoundCues.play(.start)
+                MediaMuffler.shared.engage()
+            }
         } else if phase == .listening {
             listeningEndedAt = Date()
             MediaMuffler.shared.release()
@@ -564,6 +820,17 @@ final class IslandModel {
         case "finishing": phase = .finishing; transcript = sample
         case "done": phase = .done(.pasted)
         case "copied": phase = .done(.copied)
+        case "empty": phase = .done(.empty)
+        case "edits", "edits-done":
+            freezesMarks = true
+            phase = state == "edits" ? .listening : .finishing
+            transcript = "um so let's move the design review to Tuesday and loop in"
+            markNextChange = true
+            transcript = "um so let's move the design review to Thursday and loop in the platform team"
+            if state == "edits-done" {
+                showFinal("So let's move the design review to Thursday and loop in the platform team.")
+                phase = .done(.pasted)
+            }
         case "error": phase = .error("Microphone access denied")
         case "preparing": phase = .preparing(0.42)
         default: phase = .idle
@@ -573,20 +840,25 @@ final class IslandModel {
     /// Walks through a full dictation (`--demo`).
     func runDemo() async {
         simulatesAudio = true
-        let words = "Let's move the design review to Thursday and loop in the platform team so they can weigh in on latency".split(separator: " ")
+        let words = "um let's move the design review to Tuesday and loop in the platform team so they can weigh in on latency".split(separator: " ")
+        let revised = 8  // "Tuesday" is heard again as "Thursday" a moment later
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1.2))
             start()
             try? await Task.sleep(for: .seconds(1.2))
             for count in 1...words.count {
-                withAnimation(Motion.content) { transcript = words.prefix(count).joined(separator: " ") }
+                var shown = words.prefix(count).map(String.init)
+                if count > revised + 1 { shown[revised] = "Thursday" }
+                markNextChange = true
+                withAnimation(Motion.content) { transcript = shown.joined(separator: " ") }
                 try? await Task.sleep(for: .milliseconds(220))
             }
             try? await Task.sleep(for: .seconds(0.6))
             stop()
             try? await Task.sleep(for: .seconds(1.0))
+            showFinal("Let's move the design review to Thursday and loop in the platform team so they can weigh in on latency.")
             setPhase(.done(.pasted))
-            try? await Task.sleep(for: .seconds(1.4))
+            try? await Task.sleep(for: .seconds(showsFinalEdits ? 2.2 : 1.4))
             transcript = ""
             setPhase(.idle)
         }

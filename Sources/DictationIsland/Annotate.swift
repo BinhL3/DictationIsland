@@ -539,7 +539,7 @@ private struct CapsuleView: View {
                             .monospacedDigit()
                     }
                 }
-                Text("Hold ⇧ to draw · ⌃⌥A to finish").foregroundStyle(.white.opacity(0.6))
+                Text("Hold ⇧ to draw · \(AppSettings.shared.annotateShortcut?.display ?? "menu bar") to finish").foregroundStyle(.white.opacity(0.6))
             case .starting:
                 ProgressView().controlSize(.small)
                 Text("Starting…")

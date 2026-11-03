@@ -139,6 +139,7 @@ final class IslandWindowController {
         withObservationTracking {
             _ = AppSettings.shared.placement
             _ = AppSettings.shared.showIdlePill
+            _ = AppSettings.shared.cameraCutout
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -159,7 +160,9 @@ final class IslandWindowController {
         model.updateGeometry(geometry)
         // On a notch the resting island is the black camera housing itself, so it's always "shown".
         // In the menu bar, a running notch app already draws its own resting pill in the same spot.
-        model.showsIdleIsland = geometry.style == .notch
+        // Around a camera hole the resting pill frames the camera, so it always shows.
+        let framesCamera = placement == .menuBar && settings.cameraCutout.resolved(for: screen) == .hole
+        model.showsIdleIsland = geometry.style == .notch || framesCamera
             || (placement == .menuBar && settings.showIdlePill && !IslandPlacement.notchAppIsRunning)
         panel.setFrame(geometry.canvasFrame, display: true)
     }

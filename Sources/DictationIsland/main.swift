@@ -8,7 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mainWindow = MainWindowController()
     private let onboarding = OnboardingWindowController()
     private var hotKey: HotKey?
-    private var annotateKey: HotKey?
+    private var annotateListener: ShortcutListener?
+    private var fixListener: ShortcutListener?
+    private var computerAudioListener: ShortcutListener?
     private lazy var pushToTalk = ModifierKeyTrigger(keys: Set(settings.pushToTalkKeys))
     private var pushToTalkRetry: Timer?
     private var holdStartedSession = false
@@ -24,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if AppSettings.shared.speechEngine == .bark { BarkModels.preload() }
         if AppSettings.shared.speechEngine == .parakeet { ParakeetModels.preload() }
         if AppSettings.shared.styleRewrite { StyleRewriter.prewarm() }
+        SoundCues.preload()
 
         let arguments = CommandLine.arguments
         let isDemo = arguments.contains("--demo") || arguments.contains("--state") || arguments.contains("--record")
@@ -45,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--guide-preview") { PermissionGuide.shared.show(for: .accessibility) }
         installPushToTalk(model: island.model)
         updateHotKey(model: island.model)
-        updateAnnotateKey()
+        updateShortcutListeners(model: island.model)
         observeShortcutSettings(model: island.model)
         if !isDemo { observeAudioSettings(model: island.model) }
         installStatusItem()
@@ -111,6 +114,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = edit
         main.addItem(editItem)
 
+        // ⌘1…⌘8 jump between the sidebar's pages, in sidebar order.
+        let viewItem = NSMenuItem()
+        let view = NSMenu(title: "View")
+        let pages = MainWindowController.Section.groups.flatMap(\.sections)
+        for (index, section) in pages.enumerated() where index < 9 {
+            let item = NSMenuItem(title: section.title, action: #selector(showSection(_:)), keyEquivalent: "\(index + 1)")
+            item.representedObject = section.rawValue
+            item.target = self
+            view.addItem(item)
+        }
+        viewItem.submenu = view
+        main.addItem(viewItem)
+
         let windowItem = NSMenuItem()
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -121,14 +137,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = main
     }
 
-    /// Primary trigger. Hold the push-to-talk key to talk and release to finish; tap it alone to
-    /// start hands-free mode, tap again to finish. Using it in a shortcut or to type a character is ignored.
+    /// Primary trigger, per `TalkMode`: by default hold the push-to-talk key to talk and release to
+    /// finish, or tap it alone to start hands-free mode and tap again to finish. Using it in a
+    /// shortcut or to type a character is ignored.
     private func installPushToTalk(model: IslandModel) {
+        // In an app that's off (see AppRules) the key belongs to the app, unless it's ending a
+        // dictation that's already running.
+        pushToTalk.ignoresPress = {
+            MainActor.assumeIsolated { model.phase != .listening && !AppRules.isOnInFrontmostApp }
+        }
         // The mic starts on key-down, hidden, so the first words aren't lost to the hold delay.
         pushToTalk.onPress = { MainActor.assumeIsolated { model.arm() } }
         pushToTalk.onKeyState = { key in MainActor.assumeIsolated { AppStatus.shared.heldKey = key } }
+        pushToTalk.onUserInput = { MainActor.assumeIsolated { AppStatus.shared.inputRevision += 1 } }
         pushToTalk.onChordBeforeHold = { MainActor.assumeIsolated { model.disarm() } }
-        pushToTalk.onTap = { model.toggle() }
+        pushToTalk.onTap = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.settings.talkMode == .hold {
+                    // Hold only: a tap starts nothing, but still ends a session started another
+                    // way (the menu, a click on the island).
+                    if model.phase == .listening, !model.isArmed { model.stop() } else { model.disarm() }
+                } else {
+                    model.toggle()
+                }
+            }
+        }
         pushToTalk.onHoldStart = { [weak self] in
             MainActor.assumeIsolated {
                 self?.holdStartedSession = model.phase != .listening || model.isArmed
@@ -137,8 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pushToTalk.onHoldEnd = { [weak self] in
             MainActor.assumeIsolated {
-                // A hold during a hands-free session finishes it too.
-                self?.holdStartedSession = false
+                guard let self else { return }
+                let started = self.holdStartedSession
+                self.holdStartedSession = false
+                // Press to start and stop: letting go of the press that started it leaves it
+                // running, and the next press finishes. Otherwise a release finishes (a hold
+                // during a hands-free session too).
+                if self.settings.talkMode == .toggle, started { return }
                 model.stop()
             }
         }
@@ -187,13 +226,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = settings.pushToTalkKeys
             _ = settings.fallbackShortcutEnabled
             _ = settings.annotateEnabled
+            _ = settings.annotateShortcut
+            _ = settings.fixShortcut
+            _ = settings.computerAudioShortcut
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.pushToTalk.keys = Set(self.settings.pushToTalkKeys)
                     self.updateHotKey(model: model)
-                    self.updateAnnotateKey()
+                    self.updateShortcutListeners(model: model)
                     self.observeShortcutSettings(model: model)
                 }
             }
@@ -216,6 +258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.pressStartedAt = Date()
+                self.startedOnThisPress = false
+                if model.phase != .listening, !AppRules.isOnInFrontmostApp { return }
                 if model.phase == .listening {
                     self.startedOnThisPress = false
                     model.stop()
@@ -228,21 +272,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey?.onRelease = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.startedOnThisPress, let started = self.pressStartedAt else { return }
-                if Date().timeIntervalSince(started) > 0.35 { model.stop() }
+                switch self.settings.talkMode {
+                case .holdOrTap: if Date().timeIntervalSince(started) > 0.35 { model.stop() }
+                case .hold: model.stop()
+                case .toggle: break
+                }
             }
         }
     }
 
-    /// ⌃⌥A: tap to start a screen annotation, tap again to finish.
-    private func updateAnnotateKey() {
-        guard settings.annotateEnabled else {
-            annotateKey = nil
-            return
+    /// Annotate (tap to start, tap again to finish) and Fix that, on whatever shortcuts are set.
+    private func updateShortcutListeners(model: IslandModel) {
+        let annotate = settings.annotateEnabled ? settings.annotateShortcut : nil
+        if annotateListener?.shortcut != annotate {
+            annotateListener = nil  // release the old hot key before registering a new one
+            annotateListener = annotate.flatMap { ShortcutListener($0, id: 2) { AnnotationController.shared.toggle() } }
+            if annotate != nil, annotateListener == nil { NSLog("DictationIsland: the annotate shortcut is taken by another app.") }
         }
-        guard annotateKey == nil else { return }
-        annotateKey = HotKey(keyCode: kVK_ANSI_A, modifiers: controlKey | optionKey, id: 2)
-        if annotateKey == nil { NSLog("DictationIsland: ⌃⌥A is taken by another app.") }
-        annotateKey?.onPress = { MainActor.assumeIsolated { AnnotationController.shared.toggle() } }
+        let computer = settings.computerAudioShortcut
+        if computerAudioListener?.shortcut != computer {
+            computerAudioListener = nil
+            computerAudioListener = computer.flatMap { ShortcutListener($0, id: 4) { model.toggleComputerAudio() } }
+        }
+        // Tapping it while holding the dictation key mustn't count as a shortcut chord.
+        if case .modifier(let code)? = computer {
+            pushToTalk.passThroughKeys = [TriggerKey(keyCode: code)]
+        } else {
+            pushToTalk.passThroughKeys = []
+        }
+        let fix = settings.fixShortcut
+        if fixListener?.shortcut != fix {
+            fixListener = nil
+            fixListener = fix.flatMap { ShortcutListener($0, id: 3) { model.fixLast() } }
+            if fix != nil, fixListener == nil { NSLog("DictationIsland: the Fix that shortcut is taken by another app.") }
+        }
     }
 
     private func installStatusItem() {
@@ -250,7 +313,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Dictation")
         let menu = NSMenu()
         menu.addItem(withTitle: "Start / Stop Dictation", action: #selector(toggleDictation), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Annotate Screen (⌃⌥A)", action: #selector(toggleAnnotation), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Fix Last Dictation", action: #selector(fixLast), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Annotate Screen", action: #selector(toggleAnnotation), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Open DictationIsland…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
@@ -267,8 +331,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdateChecker.shared.checkInteractively()
     }
 
+    @objc private func fixLast() {
+        island?.model.fixLast()
+    }
+
     @objc private func toggleAnnotation() {
         AnnotationController.shared.toggle()
+    }
+
+    @objc private func showSection(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let section = MainWindowController.Section(rawValue: raw) else { return }
+        mainWindow.show(section)
     }
 
     @objc private func openSettings() {

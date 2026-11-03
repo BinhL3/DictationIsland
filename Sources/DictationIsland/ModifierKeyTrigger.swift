@@ -65,6 +65,14 @@ final class ModifierKeyTrigger {
     var onTap: (() -> Void)?
     /// Became a shortcut chord after the hold had already started.
     var onChordAfterHold: (() -> Void)?
+    /// Keys that may be tapped while a trigger is held without turning it into a chord (the
+    /// computer-audio toggle, tapped mid-dictation).
+    var passThroughKeys: Set<TriggerKey> = []
+    /// Checked on key-down: true leaves this press alone entirely (the app has the key).
+    var ignoresPress: (() -> Bool)?
+    /// The person typed or clicked (not our own synthetic keys). "Fix that" uses it to know the
+    /// last paste is still the latest thing in the field.
+    var onUserInput: (() -> Void)?
     /// The trigger key went down (the key) or came up / was dropped (nil). For showing it.
     var onKeyState: ((TriggerKey?) -> Void)?
 
@@ -162,6 +170,7 @@ final class ModifierKeyTrigger {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         case .flagsChanged:
             let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if downKey != nil, passThroughKeys.contains(where: { $0.keyCode == code }) { return }
             if let downKey, code != downKey.keyCode, !downKey.isDown(flags: event.flags.rawValue) {
                 // Another modifier changed and the flags say the held key is already up: its
                 // release never arrived, so drop the stale press.
@@ -173,6 +182,7 @@ final class ModifierKeyTrigger {
                 chord()
             }
         default:
+            if type != .scrollWheel { onUserInput?() }
             if downKey != nil { chord() }
         }
     }
@@ -189,7 +199,7 @@ final class ModifierKeyTrigger {
     }
 
     private func pressed(_ key: TriggerKey) {
-        guard downKey == nil else { return }
+        guard downKey == nil, ignoresPress?() != true else { return }
         downKey = key
         isHolding = false
         isChorded = false

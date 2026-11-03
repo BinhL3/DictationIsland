@@ -16,6 +16,8 @@ final class AppStatus {
     var heldKey: TriggerKey?
     /// Home is in front and plays the live island itself, so the notch copy stays hidden.
     var islandShownInApp = false
+    /// Bumped on every real key press or click (from the key listener). See "Fix that".
+    @ObservationIgnored var inputRevision = 0
 }
 
 /// The macOS permissions the app can use, with live status and where to grant each.
@@ -47,7 +49,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .inputMonitoring: return "Only if the push-to-talk key doesn't respond with Accessibility alone."
         case .accessibility: return "Hear the push-to-talk key and paste into the app you're typing in."
         case .systemAudio: return "DJ-style muffle for music while dictating (otherwise volume is lowered)."
-        case .screenRecording: return "Record the screen for annotations (⌃⌥A)."
+        case .screenRecording: return "Record the screen for annotations."
         }
     }
 

@@ -26,15 +26,41 @@ struct GeneralSettings: View {
                 }
                 KeyRecorderRow { key in
                     if !settings.pushToTalkKeys.contains(key) { settings.pushToTalkKeys.append(key) }
+                    // A key can't both start dictation and fix the last one.
+                    if case .modifier(let code)? = settings.fixShortcut, code == key.keyCode { settings.fixShortcut = nil }
                 }
                 if settings.pushToTalkKeys.contains(.fn) {
                     GlobeKeyWarning()
                 }
                 Toggle("Also use \(HotKey.symbol)", isOn: $settings.fallbackShortcutEnabled)
+                Picker("How the key works", selection: $settings.talkMode) {
+                    ForEach(TalkMode.allCases) { Text($0.title).tag($0) }
+                }
             } header: {
                 Text("Push-to-talk keys")
             } footer: {
-                Text("Any listed key works: hold to talk and release to finish, or tap once for hands-free and tap again to finish. Add fn for an external keyboard and right ⌥ for the laptop to use both setups without switching. \(HotKey.symbol) needs no permission; plain ⌥Space is left alone for Raycast.")
+                // Built as a String first: interpolating into the key itself passes the note as an
+                // argument, and arguments aren't parsed as markdown.
+                Text(LocalizedStringKey(String("\(talkModeNote) Any listed key works. Add fn for an external keyboard and right ⌥ for the laptop to use both setups without switching. \(HotKey.symbol) needs no permission; plain ⌥Space is left alone for Raycast.")))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                LabeledContent("Fix last dictation") {
+                    ShortcutRecorder(shortcut: $settings.fixShortcut)
+                }
+                LabeledContent("Annotate screen") {
+                    ShortcutRecorder(shortcut: $settings.annotateShortcut)
+                }
+                .disabled(!settings.annotateEnabled)
+                LabeledContent("Include computer audio") {
+                    ShortcutRecorder(shortcut: $settings.computerAudioShortcut)
+                }
+            } header: {
+                Text("More shortcuts")
+            } footer: {
+                Text("Click a shortcut, then press a key on its own (like right ⌘, used by tapping it) or a combination (like ⌃⌥A). **Fix last dictation** rewrites what you just dictated with Apple Intelligence and swaps it in place; if you've typed since, the fixed version is copied instead. **Include computer audio**: tap it while dictating and what your Mac is playing (a video, a call) is transcribed along with you; a speaker shows on the island. Tap again to stop. Needs System Audio Recording permission the first time.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -43,12 +69,20 @@ struct GeneralSettings: View {
                 Picker("Position", selection: $settings.placement) {
                     ForEach(IslandPlacement.allCases) { Text($0.title).tag($0) }
                 }
+                Picker(selection: $settings.cameraCutout) {
+                    ForEach(CameraCutout.allCases) { Text($0.title).tag($0) }
+                } label: {
+                    Text("Camera cutout")
+                    Text("Pick **Camera hole** on a MacBook Pro with a hole-punch camera instead of a notch: the island rests as a pill around it, like the Dynamic Island.")
+                }
                 Toggle("Show resting pill when idle", isOn: $settings.showIdlePill)
                     .disabled(settings.placement.resolved != .menuBar)
                 Text(placementNote)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            AppRulesSection()
 
             Section("Output") {
                 Toggle("Paste into the active app", isOn: $settings.autoPaste)
@@ -58,6 +92,23 @@ struct GeneralSettings: View {
             }
 
             Section("While dictating") {
+                Toggle(isOn: $settings.liveEdits) {
+                    Text("Show edits live")
+                    Text("Experimental. Words the recognizer or the clean-up fixes flash green; words it drops are struck through in red.")
+                }
+                Picker("Sound cues", selection: $settings.soundSet) {
+                    ForEach(SoundSet.allCases) { Text($0.title).tag($0) }
+                }
+                .onChange(of: settings.soundSet) { _, set in SoundCues.audition(set) }
+                LabeledContent("Cue volume") {
+                    HStack(spacing: 8) {
+                        Slider(value: $settings.soundVolume, in: 0.05...1).frame(width: 150)
+                        Button { SoundCues.audition(settings.soundSet) } label: { Image(systemName: "play.fill") }
+                            .buttonStyle(.borderless)
+                            .help("Play")
+                    }
+                }
+                .disabled(settings.soundSet == .off)
                 Toggle("Muffle music and videos", isOn: $settings.muffleMedia)
                 LabeledContent("Muffled volume") {
                     Slider(value: $settings.muffleLevel, in: 0.02...0.6)
@@ -88,9 +139,20 @@ struct GeneralSettings: View {
         return "DictationIsland \(version)" + (build.map { " (\($0))" } ?? "")
     }
 
+    private var talkModeNote: String {
+        switch settings.talkMode {
+        case .holdOrTap: return "**Hold or tap**: hold to talk and release to finish, or tap once for hands-free and tap again to finish."
+        case .hold: return "**Hold to talk**: it only listens while the key is held; a quick tap does nothing."
+        case .toggle: return "**Press to start and stop**: press once and it keeps listening, however long you talk, until you press again."
+        }
+    }
+
     private var placementNote: String {
         if settings.placement.resolved == .belowMenuBar {
             return "The island floats just under the menu bar, clear of the notch."
+        }
+        if settings.placement.resolved == .bottom {
+            return "The island floats just above the Dock and grows upward while you dictate."
         }
         return IslandPlacement.notchAppIsRunning
             ? "Alcove is running: the island grows out of Alcove's pill and covers it while you dictate."
@@ -100,6 +162,95 @@ struct GeneralSettings: View {
 }
 
 /// Login item via `SMAppService`; state lives with the system, not in our preferences.
+/// Apps the dictation keys stay out of, so an app's own dictation can have them.
+private struct AppRulesSection: View {
+    @Bindable private var settings = AppSettings.shared
+    @State private var apps: [AppRules.Listed] = []
+    @State private var addable: [AppRules.Listed] = []
+
+    var body: some View {
+        Section {
+            if apps.isEmpty {
+                Text("Dictation works in every app.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(apps) { app in
+                HStack(spacing: 10) {
+                    Image(nsImage: app.icon).resizable().frame(width: 22, height: 22)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(app.name)
+                        if app.hasOwnDictation {
+                            Text("Has its own dictation").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Toggle("Dictation in \(app.name)", isOn: binding(for: app))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    if !app.hasOwnDictation {
+                        Button {
+                            settings.appRules[app.bundleID] = nil
+                            refresh()
+                        } label: {
+                            Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove")
+                    }
+                }
+            }
+            Menu("Turn off in an app…") {
+                ForEach(addable) { app in
+                    Button {
+                        add(app.bundleID)
+                    } label: {
+                        Label { Text(app.name) } icon: { Image(nsImage: app.icon) }
+                    }
+                }
+                if !addable.isEmpty { Divider() }
+                Button("Choose an app…", action: choose)
+            }
+            .onAppear(perform: refresh)
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in refresh() }
+        } header: {
+            Text("Apps")
+        } footer: {
+            Text("Where it's off, the push-to-talk keys do nothing and pass straight to the app, so its own voice input can use them. Apps with their own dictation, like Lark and Feishu, start off. A dictation already running still finishes with the key; Fix that and Annotate work everywhere.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func binding(for app: AppRules.Listed) -> Binding<Bool> {
+        Binding {
+            AppRules.isOn(bundleID: app.bundleID, name: app.name)
+        } set: { on in
+            settings.appRules[app.bundleID] = on
+        }
+    }
+
+    private func add(_ bundleID: String) {
+        settings.appRules[bundleID] = false
+        refresh()
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(filePath: "/Applications")
+        panel.allowedContentTypes = [.application]
+        panel.prompt = "Turn Off"
+        guard panel.runModal() == .OK, let url = panel.url, let id = Bundle(url: url)?.bundleIdentifier,
+              id != Bundle.main.bundleIdentifier else { return }
+        add(id)
+    }
+
+    private func refresh() {
+        apps = AppRules.listed()
+        addable = AppRules.addable(excluding: apps)
+    }
+}
+
 private struct LaunchAtLoginToggle: View {
     @State private var isEnabled = SMAppService.mainApp.status == .enabled
     @State private var note: String?
@@ -402,16 +553,19 @@ struct WritingSettings: View {
         Form {
             Section {
                 Toggle("Spoken formatting", isOn: $settings.spokenFormatting)
+                Toggle("Laughing adds an emoji", isOn: $settings.laughEmoji)
             } header: {
                 Text("Formatting")
             } footer: {
-                Text("Say **“new line”**, **“new paragraph”** or **“bullet point”** while dictating. Bullets paste as a real list in Notes, Mail, Docs and Slack, and as • lines everywhere else.")
+                Text("Say **“new line”**, **“new paragraph”** or **“bullet point”** while dictating. Bullets paste as a real list in Notes, Mail, Docs and Slack, and as • lines everywhere else. Laugh while you talk and a 😂 lands where you laughed (🤣 for a big one, 😄 for a chuckle), heard on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section {
                 Toggle("Tidy with Apple Intelligence", isOn: $settings.styleRewrite)
+                Toggle("Adapt to the app you're in", isOn: $settings.adaptToApp)
+                    .disabled(!settings.styleRewrite)
                     .disabled(StyleRewriter.availability != nil && !settings.styleRewrite)
                 if let reason = StyleRewriter.availability {
                     Text(reason).font(.caption).foregroundStyle(.orange)
@@ -439,7 +593,7 @@ struct WritingSettings: View {
             } header: {
                 Text("Writing style")
             } footer: {
-                Text("Removes ums and false starts, fixes punctuation, turns spoken lists into bullets, and follows your description. Runs on this Mac; nothing is sent anywhere. Adds about a second before pasting.")
+                Text("Removes ums and false starts, fixes punctuation, turns spoken lists into bullets, and follows your description. Adapting keeps chat messages casual, emails in full sentences, and leaves terminals untouched. Runs on this Mac; nothing is sent anywhere. Adds about a second before pasting. Fix last dictation (\(settings.fixShortcut?.display ?? "set it in Shortcuts & Island")) works even with this off.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -742,7 +896,11 @@ struct AnnotateSettings: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Annotate the screen with ⌃⌥A", isOn: $settings.annotateEnabled)
+                Toggle("Annotate the screen", isOn: $settings.annotateEnabled)
+                LabeledContent("Shortcut") {
+                    ShortcutRecorder(shortcut: $settings.annotateShortcut)
+                }
+                .disabled(!settings.annotateEnabled)
                 Button("Show Annotations Folder") {
                     try? FileManager.default.createDirectory(at: AnnotationController.folder, withIntermediateDirectories: true)
                     NSWorkspace.shared.open(AnnotationController.folder)
@@ -751,7 +909,7 @@ struct AnnotateSettings: View {
             } header: {
                 Text("Annotate for AI agents")
             } footer: {
-                Text("Tap ⌃⌥A, talk through what's on screen and hold ⇧ to draw on it, then tap ⌃⌥A again. You get screenshots of each moment, a timestamped transcript and the video, with a message ready to paste into Claude Code or another agent. Needs Screen Recording permission the first time.")
+                Text("Tap the shortcut, talk through what's on screen and hold ⇧ to draw on it, then tap it again. You get screenshots of each moment, a timestamped transcript and the video, with a message ready to paste into Claude Code or another agent. Needs Screen Recording permission the first time.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
