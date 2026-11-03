@@ -73,8 +73,11 @@ make install     # build, sign, install to /Applications, launch
   key passes straight to them (Settings → Shortcuts & Island → Apps).
 * **Keyboard**: in the app window, ⌘1–⌘8 switch pages; hold ⌘ to see which is which.
 * **Updates**: once a day the app asks GitHub whether a newer release exists (one request to the
-  public releases API; nothing about you is sent). If so, Home shows a Download button. Drag the new
-  version into Applications; settings and permissions carry over.
+  public releases API; nothing about you is sent). If so, Home shows an **Update** button: the app
+  downloads the new version, checks it's signed with the same certificate, swaps itself in and
+  reopens. Settings and permissions carry over, and there's no "Open Anyway" step. (If the app
+  can't replace itself, say it's running from the disk image, the button downloads the DMG
+  instead.)
 * Open the app window from the menu bar 〰 icon, or by opening the app again.
 
 ### Speech engines (Settings → Speech)
@@ -115,6 +118,8 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 ```
 
 `--simulate-notch` lays the island out as if the screen had a notch.
+`--update-from <dmg URL>` runs the in-place update against any DMG (the signature check still
+applies), for testing an update without publishing a release.
 
 | File | Role |
 |---|---|
@@ -149,6 +154,7 @@ open build/DictationIsland.app --args --record "Some text"   # one scripted dict
 | `Permissions.swift` | Status and grant flow for the permissions |
 | `MainWindow.swift` | App window: sidebar, Home (stats, Try it, placement), ⌘-number navigation |
 | `SettingsView.swift` | Settings pages: Shortcuts & Island, Speech, Writing, Microphone, Annotate, History, Permissions |
+| `UpdateChecker.swift` / `UpdateInstaller.swift` | Daily release check; in-place install (download, signature check, swap, relaunch) |
 | `scripts/` | `bundle.sh` (app), `install.sh`, `dmg.sh`, `signing.sh` (local identity), `make-icon.swift` |
 
 ## Credits

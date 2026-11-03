@@ -534,34 +534,73 @@ private struct HomeKeyCap: View {
 
 private struct UpdateBanner: View {
     let release: UpdateChecker.Release
+    private var updater: UpdateChecker { .shared }
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "arrow.down.circle.fill").font(.system(size: 20)).foregroundStyle(.white)
             VStack(alignment: .leading, spacing: 2) {
                 Text("DictationIsland \(release.version) is available").font(.system(size: 13.5, weight: .semibold))
-                Text("You have \(UpdateChecker.currentVersion). Drag the new one into Applications; settings and permissions carry over.")
+                Text(detail)
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.6))
+                    .contentTransition(.opacity)
             }
             Spacer(minLength: 8)
             Button("What's new") { NSWorkspace.shared.open(release.page) }
                 .buttonStyle(.plain)
                 .font(.system(size: 12.5))
                 .foregroundStyle(.white.opacity(0.7))
-            Button { UpdateChecker.shared.download() } label: {
-                Text("Download")
+            Button {
+                if case .failed = updater.installState {
+                    updater.download()
+                } else {
+                    Task { await updater.update() }
+                }
+            } label: {
+                Text(buttonTitle)
                     .font(.system(size: 12.5, weight: .semibold))
+                    .monospacedDigit()
                     .foregroundStyle(.black)
                     .padding(.horizontal, 14)
+                    .frame(minWidth: 84)
                     .frame(height: 28)
-                    .background(Capsule().fill(.white))
+                    .background(Capsule().fill(.white.opacity(isBusy ? 0.7 : 1)))
             }
             .buttonStyle(.plain)
+            .disabled(isBusy)
         }
+        .animation(Motion.content, value: updater.installState)
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.25)))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.accentColor.opacity(0.5)))
+    }
+
+    private var isBusy: Bool {
+        switch updater.installState {
+        case .downloading, .installing: return true
+        case .idle, .failed: return false
+        }
+    }
+
+    private var buttonTitle: String {
+        switch updater.installState {
+        case .idle: return updater.installsInPlace ? "Update" : "Download"
+        case .downloading(let fraction): return "\(Int(fraction * 100))%"
+        case .installing: return "Installing…"
+        case .failed: return "Download"
+        }
+    }
+
+    private var detail: String {
+        switch updater.installState {
+        case .failed(let reason): return "\(reason) Download it and drag it into Applications instead."
+        case .downloading, .installing: return "DictationIsland reopens when it's done."
+        case .idle:
+            return updater.installsInPlace
+                ? "You have \(UpdateChecker.currentVersion). One click, and settings and permissions carry over."
+                : "You have \(UpdateChecker.currentVersion). Drag the new one into Applications; settings and permissions carry over."
+        }
     }
 }
 

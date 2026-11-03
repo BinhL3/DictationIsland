@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         installMainMenu()
         if !isDemo { UpdateChecker.shared.start() }
+        // Testing the in-place install: --update-from <dmg URL> installs it as if it were the
+        // latest release. The signature check applies as usual.
+        if let index = arguments.firstIndex(of: "--update-from"), index + 1 < arguments.count,
+           let url = URL(string: arguments[index + 1]) {
+            UpdateChecker.shared.testInstall(from: url)
+        }
 
         if arguments.contains("--onboarding") || (!isDemo && (!OnboardingModel.isComplete || Permission.requiredMissing)) {
             onboarding.show()

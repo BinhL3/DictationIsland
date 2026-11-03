@@ -19,12 +19,25 @@ final class UpdateChecker {
     private(set) var available: Release?
     private(set) var isChecking = false
 
+    enum InstallState: Equatable {
+        case idle
+        case downloading(Double)
+        case installing
+        case failed(String)
+    }
+
+    /// Progress of `update()`. On success the app relaunches, so there's no done state.
+    private(set) var installState: InstallState = .idle
+
+    /// Whether Update can install by itself; otherwise it opens the DMG for a manual install.
+    var installsInPlace: Bool { available?.download != nil && UpdateInstaller.canInstallInPlace }
+
     static let repository = "BinhL3/DictationIsland"
     private static let interval: TimeInterval = 24 * 60 * 60
     private static let lastCheckKey = "updateLastCheck"
     @ObservationIgnored private var timer: Timer?
 
-    static var currentVersion: String {
+    nonisolated static var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     }
 
@@ -71,11 +84,22 @@ final class UpdateChecker {
             let alert = NSAlert()
             if let release {
                 alert.messageText = "DictationIsland \(release.version) is available"
-                alert.informativeText = "You have \(Self.currentVersion). Download the new version and drag it into Applications to replace this one; your settings and permissions carry over."
-                alert.addButton(withTitle: "Download")
+                alert.informativeText = installsInPlace
+                    ? "You have \(Self.currentVersion). It installs in a few seconds and DictationIsland reopens; your settings and permissions carry over."
+                    : "You have \(Self.currentVersion). Download the new version and drag it into Applications to replace this one; your settings and permissions carry over."
+                alert.addButton(withTitle: installsInPlace ? "Update Now" : "Download")
                 alert.addButton(withTitle: "Later")
                 NSApp.activate(ignoringOtherApps: true)
-                if alert.runModal() == .alertFirstButtonReturn { download() }
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                await update()
+                if case .failed(let reason) = installState {
+                    let failed = NSAlert()
+                    failed.messageText = "The update didn't install"
+                    failed.informativeText = "\(reason) You can download it and drag it into Applications instead."
+                    failed.addButton(withTitle: "Download")
+                    failed.addButton(withTitle: "Cancel")
+                    if failed.runModal() == .alertFirstButtonReturn { download() }
+                }
             } else {
                 alert.messageText = "You're up to date"
                 alert.informativeText = "DictationIsland \(Self.currentVersion) is the latest version."
@@ -85,13 +109,51 @@ final class UpdateChecker {
         }
     }
 
+    /// Installs the available release in place and relaunches, or, where that isn't possible,
+    /// opens the DMG for a manual install.
+    func update() async {
+        guard let available, let dmg = available.download, UpdateInstaller.canInstallInPlace else {
+            download()
+            return
+        }
+        switch installState {
+        case .downloading, .installing: return
+        case .idle, .failed: break
+        }
+        installState = .downloading(0)
+        do {
+            try await UpdateInstaller.install(from: dmg, version: available.version) { fraction in
+                Task { @MainActor in
+                    if case .downloading = UpdateChecker.shared.installState {
+                        UpdateChecker.shared.installState = .downloading(fraction)
+                    }
+                }
+            } installing: {
+                Task { @MainActor in UpdateChecker.shared.installState = .installing }
+            }
+            installState = .installing
+            UpdateInstaller.relaunch()
+        } catch {
+            installState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// See `--update-from` in main.swift.
+    func testInstall(from dmg: URL) {
+        available = Release(version: "test", page: dmg, download: dmg)
+        Task {
+            await update()
+            if case .failed(let reason) = installState { NSLog("DictationIsland: test update failed: \(reason)") }
+        }
+    }
+
     func download() {
         guard let available else { return }
         NSWorkspace.shared.open(available.download ?? available.page)
     }
 
     /// Numeric, component by component: 0.10.0 is newer than 0.9.1.
-    static func isNewer(_ candidate: String, than current: String) -> Bool {
+    nonisolated static func isNewer(_ candidate: String, than current: String) -> Bool {
         func parts(_ version: String) -> [Int] {
             version.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
         }
