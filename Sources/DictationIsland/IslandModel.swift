@@ -91,8 +91,8 @@ final class IslandModel {
     @ObservationIgnored private var outputChain: Task<Void, Never>?
     /// Finishing takes the user cancelled; their text is dropped instead of pasted.
     @ObservationIgnored private var cancelledTakes: Set<Int> = []
-    /// The mic stays open this long after release, because a release often lands while the last
-    /// word is still sounding (Hex measured clipped final words without it).
+    /// The mic stays open at least this long after release, because a release often lands while
+    /// the last word is still sounding; longer while you're still talking (see `ReleaseTail`).
     static let releaseTail: Duration = .milliseconds(200)
     @ObservationIgnored private var tail: Task<Void, Never>?
     /// The take the tail is still recording for.
@@ -116,6 +116,8 @@ final class IslandModel {
         /// The take's audio and the engine that heard it, so Fix that can listen again.
         var recording: TakeRecording?
         var engine: SpeechEngine?
+        /// What was spoken, so the second listen and the tidy-up stay in it (not English).
+        var language: Locale
         var pasted: Bool
         /// `AppStatus.inputRevision` right after the paste; if it moved, the person has typed
         /// or clicked since and an undo would take back their work, not ours.
@@ -126,11 +128,17 @@ final class IslandModel {
     private(set) var hearsComputer = false
     @ObservationIgnored private var computerAudio: ComputerAudioSlot?
     @ObservationIgnored private var takeRecording: TakeRecording?
+    @ObservationIgnored private var takeActivity: TakeActivity?
     /// The emoji for a laugh heard right now; the island's dot shows it instead.
     private(set) var laughingEmoji: String?
     @ObservationIgnored private var laughDetector: LaughDetector?
     /// Engine actually used for the current/last session, for display.
     private(set) var activeEngine: SpeechEngine?
+    /// The language that engine was set up for (Parakeet V3 detects its own; this is the hint).
+    @ObservationIgnored private var activeLocale: Locale?
+    /// Shown in the transcript line until the first words: the chosen model is still getting
+    /// ready, so this take uses Apple's.
+    private(set) var notice: String?
 
     init(geometry: NotchGeometry) {
         self.geometry = geometry
@@ -150,7 +158,7 @@ final class IslandModel {
         case .done: return isHovering ? .expanded : (isPill ? .message : .compact)
         case .listening, .finishing:
             if isHovering { return .expanded }
-            return transcript.isEmpty ? .compact : .peek
+            return transcript.isEmpty && notice == nil ? .compact : .peek
         }
     }
 
@@ -402,8 +410,11 @@ final class IslandModel {
         laughDetector = laughs
         let computer = ComputerAudioSlot()
         computerAudio = computer
+        notice = nil
         let recording = TakeRecording()
         takeRecording = recording
+        let activity = TakeActivity()
+        takeActivity = activity
         hearsComputer = false
         if settings.styleRewrite { StyleRewriter.prepare(style: settings.styleInstructions) }
         Task {
@@ -412,7 +423,16 @@ final class IslandModel {
             guard await AudioCapture.requestPermission() else {
                 return failSession(session, "Microphone access denied")
             }
-            let resolution = await SpeechModelCatalog.resolve(settings.speechEngine, locale: settings.locale)
+            var resolution = await SpeechModelCatalog.resolve(settings.speechEngine, locale: settings.locale)
+            // A downloaded model that's still loading mustn't hold up the dictation: its first load
+            // (and again after macOS clears its Neural Engine cache) compiles it, which can take
+            // minutes. Apple's model takes this one; the next dictation gets the chosen model.
+            if let fallback = Self.fallbackWhileLoading(resolution.engine),
+               await SpeechModelCatalog.status(of: resolution) == .installed {
+                let chosen = resolution.engine
+                resolution = await SpeechModelCatalog.resolve(.automatic, locale: fallback ?? settings.locale)
+                if current() { notice = "\(chosen.shortName) is getting ready · using \(resolution.engine.shortName)" }
+            }
             let transcriber = makeTranscriber(for: resolution, take: session)
             guard await transcriber.requestPermission() else {
                 return failSession(session, "Speech recognition denied")
@@ -445,8 +465,10 @@ final class IslandModel {
             self.gate = gate
             self.transcriber = transcriber
             activeEngine = resolution.engine
+            activeLocale = resolution.locale
             do {
                 try audio.start(deviceUID: settings.resolvedMicrophoneUID, channel: settings.inputChannel) { buffer in
+                    activity.append(buffer)  // your voice only, before the computer's audio
                     computer.mix(into: buffer)
                     recording.append(buffer)
                     gate.push(buffer)
@@ -487,14 +509,17 @@ final class IslandModel {
         let computer = computerAudio
         computerAudio = nil
         hearsComputer = false
-        let recording = takeRecording, engine = activeEngine
+        let recording = takeRecording, engine = activeEngine, locale = activeLocale
         takeRecording = nil
+        let activity = takeActivity
+        takeActivity = nil
+        activity?.markRelease()
         self.transcriber = nil
         gate = nil
         sessionSetup = nil
         isCapturing = false
         isCaptureRunning = false
-        startTail(for: take)
+        startTail(for: take, activity: activity)
 
         let tail = self.tail, previous = outputChain
         // The computer's audio keeps flowing through the release tail, then stops.
@@ -522,7 +547,7 @@ final class IslandModel {
                 }
             }
             await previous?.value
-            self?.deliver(text, take: take, seconds: spoken, context: context, recording: recording, engine: engine)
+            self?.deliver(text, take: take, seconds: spoken, context: context, recording: recording, engine: engine, locale: locale)
         }
     }
 
@@ -535,13 +560,14 @@ final class IslandModel {
 
     /// Records and pastes one finished take. Only the take on the island changes the island; an
     /// earlier take finishing behind a newer one pastes without showing anything.
-    private func deliver(_ text: String, take: Int, seconds: Double?, context: WritingContext?, recording: TakeRecording?, engine: SpeechEngine?) {
+    private func deliver(_ text: String, take: Int, seconds: Double?, context: WritingContext?, recording: TakeRecording?, engine: SpeechEngine?, locale: Locale?) {
         if cancelledTakes.remove(take) != nil { return }
         settings.record(text, seconds: seconds)
         let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
         if result != .empty {
             lastDelivery = LastDelivery(
                 text: text, context: context, recording: recording, engine: engine,
+                language: TakeLanguage.of(text, hint: locale ?? settings.locale),
                 pasted: result == .pasted, inputRevision: AppStatus.shared.inputRevision
             )
         }
@@ -552,13 +578,32 @@ final class IslandModel {
         scheduleDismiss(after: showsFinalEdits ? 2.2 : 1.4)
     }
 
-    private func startTail(for take: Int) {
+    private func startTail(for take: Int, activity: TakeActivity?) {
         tailTake = take
+        let tone = SoundCues.audibleLength(.stop)
         tail = Task { [weak self] in
+            let clock = ContinuousClock(), released = clock.now
             try? await Task.sleep(for: Self.releaseTail)
+            if let activity {
+                // Audio arrives a buffer or two late, so the wall-clock limits allow 100 ms more.
+                var grown = false
+                loop: while !Task.isCancelled {
+                    let limit: Duration = .milliseconds(grown ? ReleaseTail.cap * 10 + 100 : ReleaseTail.base * 10 + 100)
+                    if clock.now - released >= limit { break }
+                    switch activity.verdict(tone: tone, grown: grown) {
+                    case .stop: break loop
+                    case .grow: grown = true
+                    case .wait: break
+                    }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+            }
             guard let self, self.tailTake == take else { return }
             self.tailTake = nil
             self.audio.stop()
+            // A mic that delivered only exact zeros went dead without an error (seen after some
+            // calls). This take is lost, but the next one opens the input fresh.
+            if activity?.wasDigitalSilence == true { self.audio.discardPrepared() }
         }
     }
 
@@ -620,7 +665,7 @@ final class IslandModel {
             var candidate = last.text
             if let recording = last.recording {
                 let audio = recording.audio
-                if let second = await SecondOpinion.transcribe(audio.samples, sampleRate: audio.sampleRate, firstEngine: last.engine, locale: settings.locale) {
+                if let second = await SecondOpinion.transcribe(audio.samples, sampleRate: audio.sampleRate, firstEngine: last.engine, language: last.language) {
                     candidate = second.text
                     if settings.spokenFormatting { candidate = SpokenFormatter.apply(to: candidate) }
                     candidate = settings.corrections.apply(to: candidate)
@@ -628,7 +673,7 @@ final class IslandModel {
             }
             if StyleRewriter.availability == nil {
                 // The person asked and is watching: allow a cold model time to load.
-                candidate = await StyleRewriter.rewrite(candidate, instructions: settings.styleInstructions, context: last.context, always: true, timeout: .seconds(10))
+                candidate = await StyleRewriter.rewrite(candidate, instructions: settings.styleInstructions, context: last.context, always: true, timeout: .seconds(10), language: last.language)
                 candidate = settings.corrections.apply(to: candidate)
             }
             guard phase == .finishing, finishingLabel == "Fixing" else { return }
@@ -697,6 +742,7 @@ final class IslandModel {
         computerAudio?.set(nil)
         computerAudio = nil
         takeRecording = nil
+        takeActivity = nil
         hearsComputer = false
         gate = nil
         sessionSetup = nil
@@ -709,6 +755,27 @@ final class IslandModel {
         fail(message)
     }
 
+    /// For a downloaded model that isn't loaded yet: starts loading it and returns the language
+    /// Apple's model should use instead (inner nil: the user's language). Nil when it's ready.
+    private static func fallbackWhileLoading(_ engine: SpeechEngine) -> Locale?? {
+        switch engine {
+        case .bark:
+            if BarkModels.isLoaded { return nil }
+            BarkModels.preload()
+            return .some(Locale(identifier: "en-US"))
+        case .parakeet:
+            if ParakeetModels.isLoaded { return nil }
+            ParakeetModels.preload()
+            return .some(nil)
+        case .parakeetVietnamese:
+            if ParakeetVietnameseModels.isLoaded { return nil }
+            ParakeetVietnameseModels.preload()
+            return .some(Locale(identifier: "vi-VN"))
+        default:
+            return nil
+        }
+    }
+
     private func makeTranscriber(for resolution: SpeechModelCatalog.Resolution, take: Int) -> Transcriber {
         let transcriber: Transcriber
         let hints = settings.corrections.hints
@@ -719,6 +786,7 @@ final class IslandModel {
             transcriber = apple
         case .bark: transcriber = SegmentedTranscriber { try await BarkModels.shared() }
         case .parakeet: transcriber = SegmentedTranscriber { try await ParakeetModels.shared() }
+        case .parakeetVietnamese: transcriber = SegmentedTranscriber { try await ParakeetVietnameseModels.shared() }
         default:
             let analyzer = SpeechAnalyzerTranscriber(resolution: resolution)
             analyzer.contextualStrings = hints
@@ -791,6 +859,7 @@ final class IslandModel {
 
     private func setPhase(_ newPhase: DictationPhase) {
         if case .done = newPhase {} else { showsFinalEdits = false }
+        if newPhase == .idle { notice = nil }
         if newPhase == .listening {
             listeningStartedAt = Date()
             listeningEndedAt = nil
@@ -815,6 +884,7 @@ final class IslandModel {
         if state == "finishing" { listeningEndedAt = Date() }
         switch state {
         case "compact": phase = .listening
+        case "warming": phase = .listening; notice = "Bark 3.0 is getting ready · using Apple Speech"
         case "peek": phase = .listening; transcript = sample
         case "expanded": phase = .listening; transcript = sample; isHovering = true
         case "finishing": phase = .finishing; transcript = sample

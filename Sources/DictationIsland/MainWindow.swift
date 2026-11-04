@@ -365,12 +365,15 @@ private struct HomeView: View {
                 .onChange(of: liveIsland?.showsIdleIsland) { _, _ in syncDemo() }
             VStack(alignment: .leading, spacing: 6) {
                 Text(greeting).font(.system(size: 28, weight: .bold))
-                HStack(spacing: 7) {
-                    Circle().fill(Permission.requiredMissing ? .orange : .green).frame(width: 7, height: 7)
-                    Text(Permission.requiredMissing ? "A permission is missing. Open Permissions to fix it." : keyHint)
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Circle().fill(Permission.requiredMissing || ModelWarmup.shared.message != nil ? .orange : .green)
+                        .frame(width: 7, height: 7)
+                    Text(Permission.requiredMissing ? "A permission is missing. Open Permissions to fix it." : ModelWarmup.shared.message ?? keyHint)
                         .font(.system(size: 13.5))
                         .foregroundStyle(.white.opacity(0.65))
+                        .contentTransition(.opacity)
                 }
+                .animation(Motion.content, value: ModelWarmup.shared.preparing)
             }
         }
     }

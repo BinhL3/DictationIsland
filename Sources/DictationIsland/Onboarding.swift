@@ -22,7 +22,10 @@ final class OnboardingModel {
     }
 
     var step: Step {
-        didSet { UserDefaults.standard.set(step.rawValue, forKey: Keys.step) }
+        didSet {
+            // The screenshot preview mustn't move the real onboarding along.
+            if !CommandLine.arguments.contains("--setup-preview") { UserDefaults.standard.set(step.rawValue, forKey: Keys.step) }
+        }
     }
     private(set) var micGranted = false
     private(set) var micDenied = false
@@ -45,7 +48,9 @@ final class OnboardingModel {
     static var isComplete: Bool { UserDefaults.standard.bool(forKey: Keys.complete) }
 
     init() {
-        step = UserDefaults.standard.string(forKey: Keys.step).flatMap(Step.init) ?? .welcome
+        step = CommandLine.arguments.contains("--setup-preview")
+            ? .setup
+            : UserDefaults.standard.string(forKey: Keys.step).flatMap(Step.init) ?? .welcome
         demo = IslandModel(geometry: NotchGeometry(
             style: .notch, closedSize: CGSize(width: 150, height: 30), topInset: 0, screenFrame: .zero
         ))
@@ -79,7 +84,10 @@ final class OnboardingModel {
             let demo = demo
             demoTask = Task { await demo.runDemo() }
         }
-        if step == .setup { startModelIfNeeded() }
+        if step == .setup {
+            startModelIfNeeded()
+            if previewsSetup { ModelChoice.shared.showPreview() } else { ModelChoice.shared.startIfNeeded() }
+        }
     }
 
     func finish() {
@@ -141,7 +149,7 @@ final class OnboardingModel {
             micGranted = true
             accessibilityGranted = false
             accessibilityStale = CommandLine.arguments.contains("--stale")
-            model = .downloading(0.42)
+            model = .ready
             return
         }
         micGranted = Permission.microphone.isGranted
@@ -216,7 +224,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
             let model = OnboardingModel()
             self.model = model
             let window = NSWindow(
-                contentRect: CGRect(x: 0, y: 0, width: 560, height: 600),
+                contentRect: CGRect(x: 0, y: 0, width: 560, height: 640),
                 styleMask: [.titled, .closable, .fullSizeContentView],
                 backing: .buffered, defer: false
             )
@@ -270,7 +278,7 @@ private struct OnboardingView: View {
 
             StepDots(step: model.step).padding(.bottom, 22)
         }
-        .frame(width: 560, height: 600)
+        .frame(width: 560, height: 640)
         .background(.black)
         .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
@@ -396,7 +404,7 @@ private struct SetupPage: View {
     var body: some View {
         VStack(spacing: 26) {
             Headline(title: "Setting up", subtitle: "Two permissions and a speech model. The model downloads while you allow these.")
-                .padding(.top, 60)
+                .padding(.top, 28)
             VStack(spacing: 0) {
                 SetupRow(
                     icon: "mic.fill", title: "Microphone", detail: "To hear you while you hold the key.",
@@ -426,6 +434,9 @@ private struct SetupPage: View {
                     icon: "waveform", title: "Speech model", detail: modelDetail,
                     state: modelState, action: model.retryModel
                 )
+                ModelPicker(choice: ModelChoice.shared)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
             }
             .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.white.opacity(0.05)))
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.07)))
@@ -438,12 +449,23 @@ private struct SetupPage: View {
         .animation(Motion.content, value: model.listenerBlocked)
     }
 
+    /// Apple's model has to be there for Try it; the pick's own progress shows in the picker.
     private var modelDetail: String {
         switch model.model {
         case .checking: return "Checking what's installed…"
-        case .ready: return "Installed. Works offline."
-        case .downloading(let fraction): return "Downloading · \(Int(fraction * 100))%"
+        case .downloading(let fraction): return "Getting Apple's model ready · \(Int(fraction * 100))%"
         case .failed: return "The download didn't finish."
+        case .ready:
+            let choice = ModelChoice.shared
+            guard let selected = choice.selected else { return "Installed. Works offline." }
+            switch choice.state {
+            case .downloading, .preparing:
+                return "Apple Speech fills in until \(selected.title) is ready."
+            case .failed:
+                return "\(selected.title) didn't download. Pick it again to retry."
+            case .ready, .idle:
+                return "\(selected.title), on this Mac. Works offline."
+            }
         }
     }
 
@@ -453,6 +475,70 @@ private struct SetupPage: View {
         case .failed: return .todo("Retry")
         case .checking: return .working(nil)
         case .downloading(let fraction): return .working(fraction)
+        }
+    }
+}
+
+/// The three speech models, the recommended one marked; picking one starts its download.
+private struct ModelPicker: View {
+    let choice: ModelChoice
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ForEach(ModelChoice.Option.allCases) { option in
+                Button { choice.choose(option) } label: { row(option) }
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(.leading, 48)
+        .animation(Motion.content, value: choice.selected)
+        .animation(Motion.content, value: choice.state)
+    }
+
+    private func row(_ option: ModelChoice.Option) -> some View {
+        let isSelected = choice.selected == option
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .white.opacity(0.35))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(option.title).font(.system(size: 13, weight: .semibold))
+                    if option == choice.recommended {
+                        Text("Recommended")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.3)))
+                    }
+                }
+                Text(option.summary).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
+            }
+            Spacer(minLength: 8)
+            Text(status(option))
+                .font(.system(size: 11.5).monospacedDigit())
+                .foregroundStyle(.white.opacity(isSelected ? 0.75 : 0.4))
+                .contentTransition(.numericText())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.white.opacity(isSelected ? 0.08 : 0.02))
+        )
+        .contentShape(Rectangle())
+    }
+
+    private func status(_ option: ModelChoice.Option) -> String {
+        guard choice.selected == option else {
+            if option.isInstalled { return option == .apple ? "Built in" : "Installed" }
+            return option.size ?? ""
+        }
+        switch choice.state {
+        case .downloading(let fraction): return "\(Int(fraction * 100))%"
+        case .preparing: return "Setting up…"
+        case .failed: return "Retry"
+        case .ready, .idle: return option == .apple ? "Built in" : "Installed"
         }
     }
 }

@@ -115,6 +115,10 @@ private final class FileDownload: NSObject, URLSessionDownloadDelegate, @uncheck
 actor LoadOnce<Value: Sendable> {
     private let load: @Sendable () async throws -> Value
     private var task: Task<Value, Error>?
+    private let loaded = OSAllocatedUnfairLock(initialState: false)
+
+    /// True once a load has finished, readable from anywhere without waiting.
+    nonisolated var isLoaded: Bool { loaded.withLock { $0 } }
 
     init(_ load: @escaping @Sendable () async throws -> Value) {
         self.load = load
@@ -125,7 +129,9 @@ actor LoadOnce<Value: Sendable> {
         let task = Task { try await load() }
         self.task = task
         do {
-            return try await task.value
+            let value = try await task.value
+            loaded.withLock { $0 = true }
+            return value
         } catch {
             self.task = nil
             throw error

@@ -47,6 +47,14 @@ enum SoundCues {
         player.play()
     }
 
+    /// How long `cue` sounds when played now; 0 when sound cues are off or silent.
+    static func audibleLength(_ cue: SoundCue) -> TimeInterval {
+        let settings = AppSettings.shared
+        guard settings.soundSet != .off, settings.soundVolume > 0,
+              let player = player(settings.soundSet, cue) else { return 0 }
+        return player.duration
+    }
+
     /// For the Settings picker.
     static func audition(_ set: SoundSet) {
         guard set != .off else { return }

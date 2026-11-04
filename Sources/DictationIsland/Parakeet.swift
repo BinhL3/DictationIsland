@@ -75,6 +75,9 @@ final class ParakeetModels: @unchecked Sendable {
 
     private static let loader = LoadOnce { try await ParakeetModels.load() }
 
+    /// Loaded and warm, so a dictation can start on it without waiting.
+    static var isLoaded: Bool { loader.isLoaded }
+
     /// Loads once; concurrent callers share the same load.
     static func shared() async throws -> ParakeetModels {
         try await loader.value()
@@ -83,7 +86,7 @@ final class ParakeetModels: @unchecked Sendable {
     /// Warms the models in the background so the first dictation doesn't wait for them.
     static func preload() {
         guard ParakeetModel.isInstalled else { return }
-        Task.detached(priority: .utility) { _ = try? await shared() }
+        ModelWarmup.warm(.parakeet) { _ = try await shared() }
     }
 
     private static func load() async throws -> ParakeetModels {

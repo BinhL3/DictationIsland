@@ -24,9 +24,27 @@ enum TextPipeline {
 }
 
 /// Spoken formatting commands, handled without AI so they're instant and predictable:
-/// "new line", "new paragraph", and "bullet point" (also "next bullet") to start a list item.
+/// "new line", "new paragraph", "bullet point" (also "next bullet") to start a list item, and
+/// "quote … unquote" (or "end quote") around a phrase.
 enum SpokenFormatter {
     static func apply(to text: String) -> String {
+        quoted(lines(text))
+    }
+
+    /// "he said quote not today unquote" → `he said "not today"`. Only a "quote" with a closing
+    /// "unquote", "end quote" or "close quote" later in the take counts, so a lone "quote",
+    /// "quotes", "quoted", and "the so-called quote unquote experts" stay as said.
+    static func quoted(_ text: String) -> String {
+        let closer = "(?:unquote|end quote|close quote)"
+        let pattern = "(?<!\\b(?:the|a|an|this|that|my|your|his|her|their|our|great|favorite|end|close)\\s)"
+            + "\\b(?:open )?quote\\b[\\s,.:]*"
+            + "(?!\(closer)\\b)([^\\s,][\\s\\S]*?)"
+            + "[\\s,.;:]*\\b\(closer)\\b"
+        guard text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil else { return text }
+        return text.replacingOccurrences(of: pattern, with: "\"$1\"", options: [.regularExpression, .caseInsensitive])
+    }
+
+    private static func lines(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         var result = text
         // Recognizers punctuate around commands ("…today. New paragraph. Thanks"), so each
@@ -99,6 +117,7 @@ enum StyleRewriter {
         - Fix capitalization, punctuation and obvious grammar slips.
         - Use bullet points ("• ") only when the transcript lists three or more separate tasks or items, or already has them.
         - Keep existing line breaks.
+        - Write in the transcript's own language. Never translate it, even though these instructions and examples are in English.
         Sometimes a <context> block comes first. Use it only to pick the tone, and to continue smoothly from the text already written (if that ends mid-sentence, don't start with a capital). Never copy anything from the context into your answer.
         Output only the edited text.
 
@@ -147,9 +166,13 @@ enum StyleRewriter {
     ///   - context: where the text is going; it goes in the prompt rather than the instructions,
     ///     so the session warmed at key-down still applies.
     ///   - always: "Fix that" rewrites even short takes.
-    @MainActor static func rewrite(_ text: String, instructions style: String, context: WritingContext? = nil, always: Bool = false, timeout: Duration? = nil) async -> String {
+    ///   - language: what was spoken, when known. The model edits only languages it supports,
+    ///     and an answer in another language (a translation) is thrown away.
+    @MainActor static func rewrite(_ text: String, instructions style: String, context: WritingContext? = nil, always: Bool = false, timeout: Duration? = nil, language: Locale? = nil) async -> String {
         guard availability == nil else { return text }
         guard always || text.split(whereSeparator: \.isWhitespace).count >= minimumWords else { return text }
+        let code = language.map(TakeLanguage.code) ?? TakeLanguage.detect(text)
+        if let code, !SystemLanguageModel.default.supportsLocale(Locale(identifier: code)) { return text }
         let session = takeSession(style: style)
         let prompt = (context?.promptLines ?? "") + "Transcript: \(text)\nEdited:"
         final class Box: @unchecked Sendable { var text: String? }
@@ -168,7 +191,8 @@ enum StyleRewriter {
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let before = context?.textBeforeCursor { result = strippingRepeat(of: before, from: result) }
-        return isPlausibleEdit(of: text, result) ? result : text
+        if let code, !TakeLanguage.matches(result, code) { return text }
+        return isPlausibleEdit(of: text, result, strict: (code ?? "en") != "en") ? result : text
     }
 
     /// The model tends to restate the text already in the field ("Hi Daniel," again) before its
@@ -215,18 +239,21 @@ enum StyleRewriter {
     }
 
     /// Guards against the model dropping most of the text or writing its own: an edit keeps
-    /// roughly the same length and most of the same words.
-    static func isPlausibleEdit(of original: String, _ edited: String) -> Bool {
+    /// roughly the same length and most of the same words. `strict` for languages other than
+    /// English, which the model handles less well (it turned a Vietnamese "thứ" into "thứ hai", a
+    /// Monday nobody said) and where there's less filler to drop.
+    static func isPlausibleEdit(of original: String, _ edited: String, strict: Bool = false) -> Bool {
         func words(_ s: String) -> [String] {
             s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
         }
         let before = words(original), after = words(edited)
         guard !after.isEmpty, !before.isEmpty else { return false }
         let ratio = Double(after.count) / Double(before.count)
-        guard ratio > 0.45, ratio < 1.5 else { return false }
+        guard ratio > (strict ? 0.8 : 0.45), ratio < (strict ? 1.2 : 1.5) else { return false }
         let kept = Set(before)
         let shared = after.filter(kept.contains).count
-        return Double(shared) / Double(after.count) > 0.7
+        // Strict: punctuation, capitals and dropped filler only, no words that weren't spoken.
+        return strict ? shared == after.count : Double(shared) / Double(after.count) > 0.7
     }
 }
 

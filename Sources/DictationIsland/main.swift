@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindow.liveIsland = island.model
         if AppSettings.shared.speechEngine == .bark { BarkModels.preload() }
         if AppSettings.shared.speechEngine == .parakeet { ParakeetModels.preload() }
+        if AppSettings.shared.speechEngine == .parakeetVietnamese { ParakeetVietnameseModels.preload() }
         if AppSettings.shared.styleRewrite { StyleRewriter.prewarm() }
         SoundCues.preload()
 

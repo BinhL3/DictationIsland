@@ -182,6 +182,12 @@ final class AudioCapture {
         meter.reset()
     }
 
+    /// Forgets the prepared engine so the next `start` opens the input from scratch.
+    func discardPrepared() {
+        guard !(graph?.engine.isRunning ?? false) else { return }
+        graph = nil
+    }
+
     private var configurationObserver: NSObjectProtocol?
     /// Rebuilds after real configuration changes this session; capped so a device that keeps
     /// stopping can't turn into a loop.

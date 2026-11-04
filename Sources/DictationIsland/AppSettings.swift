@@ -208,7 +208,7 @@ final class AppSettings {
         }
     }
     private(set) var corrections: Corrections
-    /// "new line", "new paragraph" and "bullet point" become formatting.
+    /// "new line", "new paragraph", "bullet point" and "quote … unquote" become formatting.
     var spokenFormatting: Bool {
         didSet { defaults.set(spokenFormatting, forKey: Keys.spokenFormatting) }
     }
@@ -256,6 +256,7 @@ final class AppSettings {
             defaults.set(speechEngine.rawValue, forKey: Keys.speechEngine)
             if speechEngine == .bark { BarkModels.preload() }
             if speechEngine == .parakeet { ParakeetModels.preload() }
+            if speechEngine == .parakeetVietnamese { ParakeetVietnameseModels.preload() }
         }
     }
     /// nil follows the system language.

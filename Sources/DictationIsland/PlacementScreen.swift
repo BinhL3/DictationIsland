@@ -14,6 +14,8 @@ struct PlacementScreen: View {
 
     /// How far the island is dragged from its spot.
     @State private var dragOffset: CGFloat = 0
+    /// This Mac's desktop picture, scaled down; nil until loaded or if it can't be read.
+    @State private var desktopPicture: CGImage? = DesktopPicture.cached
     @State private var dragTarget: Slot?
     /// From the first drag until the new spot is committed: the shape follows the drag.
     @State private var moving = false
@@ -284,14 +286,22 @@ struct PlacementScreen: View {
     }
 
     private var wallpaper: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.05, green: 0.08, blue: 0.24), Color(red: 0.17, green: 0.13, blue: 0.42), Color(red: 0.46, green: 0.22, blue: 0.5)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-            RadialGradient(colors: [Color(red: 0.2, green: 0.45, blue: 1).opacity(0.55), .clear], center: .bottomLeading, startRadius: 0, endRadius: 320)
-            RadialGradient(colors: [Color(red: 1, green: 0.55, blue: 0.35).opacity(0.35), .clear], center: .bottomTrailing, startRadius: 0, endRadius: 260)
-        }
+        // The viewer's own desktop picture, so the little screen looks like theirs. A flat colour
+        // stands in until it loads, or when it can't be read (a moving aerial, say).
+        Color(red: 0.17, green: 0.16, blue: 0.36)
+            .overlay {
+                if let desktopPicture {
+                    Image(decorative: desktopPicture, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .transition(.opacity)
+                }
+            }
+            .clipped()
+            .task {
+                guard desktopPicture == nil, let picture = await DesktopPicture.load() else { return }
+                withAnimation(.easeOut(duration: 0.3)) { desktopPicture = picture }
+            }
     }
 
     private var menuBar: some View {
@@ -331,5 +341,31 @@ struct PlacementScreen: View {
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.white.opacity(0.16)))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.2)))
         .padding(.bottom, max(2, (dockHeight - icon - 14) / 2))
+    }
+}
+
+/// The desktop picture of the screen the island is on, decoded once at preview size. Desktop
+/// pictures are often 20+ MB HEICs, so it's downsampled off the main thread.
+enum DesktopPicture {
+    @MainActor static var cached: CGImage?
+
+    @MainActor
+    static func load() async -> CGImage? {
+        if let cached { return cached }
+        guard let screen = NSScreen.preferredIslandScreen ?? NSScreen.main,
+              let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
+        let image = await Task.detached(priority: .utility) { decode(url) }.value
+        cached = image
+        return image
+    }
+
+    private nonisolated static func decode(_ url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1400,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }

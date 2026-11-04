@@ -17,6 +17,9 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
     /// NVIDIA Parakeet TDT 0.6B v3 on Core ML: Handy's and Noi's recommended model. A one-time
     /// ~630 MB download; 25 European languages, detected automatically.
     case parakeet
+    /// NVIDIA Parakeet CTC 0.6B Vietnamese on Core ML: Vietnamese, with English mixed in.
+    /// A one-time ~600 MB download.
+    case parakeetVietnamese
     /// `SFSpeechRecognizer`: the pre-macOS 26 API.
     case legacy
 
@@ -29,6 +32,7 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         case .appleDictation: return "Apple Dictation (system dictation model)"
         case .bark: return "Underdog Bark 3.0 (download, English)"
         case .parakeet: return "NVIDIA Parakeet V3 (download)"
+        case .parakeetVietnamese: return "Parakeet Vietnamese (download, Tiếng Việt)"
         case .legacy: return "Legacy Speech Recognizer"
         }
     }
@@ -40,6 +44,7 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         case .appleDictation: return "Apple Dictation"
         case .bark: return "Bark 3.0"
         case .parakeet: return "Parakeet V3"
+        case .parakeetVietnamese: return "Parakeet Vietnamese"
         case .legacy: return "Legacy"
         }
     }
@@ -75,6 +80,8 @@ enum SpeechModelCatalog {
             return Resolution(engine: .bark, locale: locale)
         case .parakeet:
             return Resolution(engine: .parakeet, locale: locale)
+        case .parakeetVietnamese:
+            return Resolution(engine: .parakeetVietnamese, locale: Locale(identifier: "vi-VN"))
         case .legacy:
             break
         }
@@ -93,6 +100,8 @@ enum SpeechModelCatalog {
             return BarkModel.isInstalled ? .installed : .downloadable
         case .parakeet:
             return ParakeetModel.isInstalled ? .installed : .downloadable
+        case .parakeetVietnamese:
+            return ParakeetVietnameseModel.isInstalled ? .installed : .downloadable
         case .legacy:
             return .installed
         case .automatic:
@@ -112,6 +121,12 @@ enum SpeechModelCatalog {
         if resolution.engine == .parakeet {
             try await ParakeetModel.download { progress?($0) }
             ParakeetModels.preload()
+            return
+        }
+        if resolution.engine == .parakeetVietnamese {
+            try await ParakeetVietnameseModel.download { progress?($0) }
+            // Compiles both models for this Mac on first load.
+            _ = try await ParakeetVietnameseModels.shared()
             return
         }
         guard let module = makeModule(resolution) else { return }
@@ -141,7 +156,7 @@ enum SpeechModelCatalog {
                 reportingOptions: [.volatileResults, .frequentFinalization],
                 attributeOptions: []
             )
-        case .bark, .parakeet, .legacy, .automatic:
+        case .bark, .parakeet, .parakeetVietnamese, .legacy, .automatic:
             return nil
         }
     }

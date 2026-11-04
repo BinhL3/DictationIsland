@@ -54,11 +54,14 @@ make install     # build, sign, install to /Applications, launch
   tidies a sentence, changed words flash green and dropped words stay a moment, struck through in
   red.
 * **Fix that**: tap **right ⌘** after a dictation and Apple Intelligence rewrites it and swaps it
-  in place (if you've typed since, the fixed version is copied instead).
+  in place (if you've typed since, the fixed version is copied instead). It stays in the language
+  you spoke: the second listen only uses engines for that language, and a rewrite that translates
+  (or, outside English, adds words you didn't say) is thrown away.
 * **Include computer audio**: tap **left ⇧** while dictating and what your Mac is playing (a
   video, a call) is transcribed along with you. Tap again to stop.
 * **⌃⌥Space** is an optional backup shortcut that needs no permissions (off by default).
-* **Formatting**: say "new line", "new paragraph" or "bullet point". Bullets paste as a real list
+* **Formatting**: say "new line", "new paragraph" or "bullet point", and "quote … unquote" (or
+  "end quote") to put a phrase in quotation marks. Bullets paste as a real list
   in Notes, Mail, Docs and Slack.
 * **Words** (Settings → Writing): fix things it keeps mishearing (`get hub -> GitHub`) and teach it
   names.
@@ -88,9 +91,13 @@ make install     # build, sign, install to /Applications, launch
 | **Apple Dictation** | The model behind macOS keyboard dictation (`DictationTranscriber`). |
 | **Underdog Bark 3.0** | Parakeet V3 post-trained for English: as accurate overall, better on conversational speech. One-time ~200 MB download, runs on Core ML. The first load compiles it for the Neural Engine, which takes several minutes. |
 | **NVIDIA Parakeet V3** | 25 European languages, auto-detected. One-time ~630 MB download, runs on Core ML. |
+| **NVIDIA Parakeet Vietnamese** | Vietnamese, with English words mixed in, punctuated. One-time ~600 MB download (OpenVoiceOS's int8 Core ML export), runs on the Neural Engine. |
 | **Legacy** | `SFSpeechRecognizer`. |
 
-*Automatic* picks the best Apple model for your language.
+*Automatic* picks the best Apple model for your language (Apple Dictation covers Vietnamese
+too, with nothing to download). Setup recommends a model for your Mac's language (Bark for
+English, Parakeet V3 for other European languages, Parakeet Vietnamese for Vietnamese) and
+downloads it in the background while Apple's model fills in.
 
 ### Other settings
 
@@ -129,6 +136,7 @@ applies), for testing an update without publishing a release.
 | `WindowSpace.swift` | Private window-server space with an absolute level, so the island draws above menu bar apps |
 | `NotchGeometry.swift` | Notch / camera hole / pill detection, top and bottom edges, `NotchShape` (morphs notch ↔ pill) |
 | `PlacementScreen.swift` | The draggable MacBook placement picker on Home, magnetic snapping |
+| `ReleaseTail.swift` | How long the mic keeps listening after release: 200 ms, longer while you're still talking |
 | `LiveEdits.swift` | Word-level diff behind the green/red live edits |
 | `AppRules.swift` | Per-app on/off for the dictation keys |
 | `WritingContext.swift` | Reads the focused app and field so the clean-up can match it |
@@ -144,6 +152,8 @@ applies), for testing an update without publishing a release.
 | `SpeechAnalyzerTranscriber.swift` | `SpeechAnalyzer` engines (Apple Speech / Apple Dictation), model install, engine resolution |
 | `LocalModels.swift` | Shared by the downloaded engines: pinned Hugging Face downloads, live re-decoding, pause-aligned 15 s segments |
 | `Parakeet.swift` | Parakeet TDT 0.6B v3 on Core ML: model files, TDT greedy decode |
+| `ParakeetVietnamese.swift` | Parakeet CTC Vietnamese on Core ML: compile-once cache, CTC greedy decode |
+| `ModelChoice.swift` | The model picked in setup: background download, switch-over when ready |
 | `Bark.swift` | Bark 3.0: Core ML encoder, mel frontend and TDT decoder ported from the reference Python, `.npz` reader |
 | `MediaMuffler.swift` | Process tap + aggregate device + realtime low-pass sweep; volume-fade fallback with crash-safe restore |
 | `TextInserter.swift` | Clipboard + synthetic ⌘V |

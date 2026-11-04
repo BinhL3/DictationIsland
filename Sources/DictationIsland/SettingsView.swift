@@ -420,6 +420,7 @@ struct SpeechSettings: View {
                     Text("**Apple Dictation** is the model behind macOS keyboard dictation. It covers more languages and is tuned for short phrases.")
                     Text("**Underdog Bark 3.0** is Parakeet V3 post-trained for English by Conway Research: as accurate in a much smaller model, and better on conversational speech. English only. One-time \(BarkModel.downloadSize.formatted(.byteCount(style: .file))) download.")
                     Text("**NVIDIA Parakeet V3** is the open model Handy and Noi recommend. 25 European languages, detected automatically, so the language setting doesn't apply. One-time \(ParakeetModel.downloadSize.formatted(.byteCount(style: .file))) download.")
+                    Text("**NVIDIA Parakeet Vietnamese** is trained for Vietnamese and handles English words mixed in, with punctuation. One-time \(ParakeetVietnameseModel.downloadSize.formatted(.byteCount(style: .file))) download. (Apple Dictation also does Vietnamese, with nothing to download.)")
                     Text("All of them run on-device and work offline once downloaded.")
                 }
                 .font(.caption)
@@ -471,6 +472,7 @@ private struct SpeechModelStatusRow: View {
         guard let resolution else { return "Checking…" }
         if resolution.engine == .bark { return "Bark 3.0 · English" }
         if resolution.engine == .parakeet { return "Parakeet V3 · 25 languages, auto-detected" }
+        if resolution.engine == .parakeetVietnamese { return "Parakeet Vietnamese · Tiếng Việt, with English" }
         let language = Locale.current.localizedString(forIdentifier: resolution.locale.identifier) ?? resolution.locale.identifier
         return "\(resolution.engine.shortName) · \(language)"
     }
@@ -478,6 +480,7 @@ private struct SpeechModelStatusRow: View {
     private var detail: String {
         if let error { return error }
         guard let resolution, let status else { return " " }
+        if ModelWarmup.shared.preparing == resolution.engine, let message = ModelWarmup.shared.message { return message }
         if resolution.engine == .legacy {
             return engine == .legacy
                 ? "Older model. Needs Speech Recognition permission."
@@ -490,6 +493,7 @@ private struct SpeechModelStatusRow: View {
             switch resolution.engine {
             case .bark: return "Not downloaded yet (\(BarkModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
             case .parakeet: return "Not downloaded yet (\(ParakeetModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
+            case .parakeetVietnamese: return "Not downloaded yet (\(ParakeetVietnameseModel.downloadSize.formatted(.byteCount(style: .file)))). It also downloads on first use."
             default: return "Model not downloaded yet. It also downloads on first use."
             }
         case .unsupported: return "Not supported on this Mac."
@@ -557,7 +561,7 @@ struct WritingSettings: View {
             } header: {
                 Text("Formatting")
             } footer: {
-                Text("Say **“new line”**, **“new paragraph”** or **“bullet point”** while dictating. Bullets paste as a real list in Notes, Mail, Docs and Slack, and as • lines everywhere else. Laugh while you talk and a 😂 lands where you laughed (🤣 for a big one, 😄 for a chuckle), heard on this Mac.")
+                Text("Say **“new line”**, **“new paragraph”** or **“bullet point”** while dictating, and **“quote … unquote”** around a phrase to put it in quotation marks. Bullets paste as a real list in Notes, Mail, Docs and Slack, and as • lines everywhere else. Laugh while you talk and a 😂 lands where you laughed (🤣 for a big one, 😄 for a chuckle), heard on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

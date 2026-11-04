@@ -181,6 +181,13 @@ struct IslandView: View {
                 .foregroundStyle(.orange)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        } else if model.liveWords.isEmpty, let notice = model.notice {
+            Text(notice)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.45))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity)
         } else {
             LiveTranscriptLine(words: model.liveWords, isFinishing: model.phase == .finishing)
         }

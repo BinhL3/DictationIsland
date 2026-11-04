@@ -42,14 +42,22 @@ struct TriggerKey: Codable, Hashable, Identifiable {
 
     /// Whether a `flagsChanged` event for this key means it went down.
     func isDown(flags: UInt64) -> Bool { flags & mask != 0 }
+
+    /// Whether `flags` show any other supported modifier held (caps lock doesn't count).
+    func othersDown(flags: UInt64) -> Bool {
+        flags & (Self.allMasks & ~mask) != 0
+    }
+
+    private static let allMasks = table.values.reduce(UInt64(0)) { $0 | $1.mask }
 }
 
 /// Push-to-talk on one or more trigger keys (e.g. fn on an external keyboard *and* right ⌥ on the
 /// laptop), seen through a listen-only CGEvent tap.
 ///
 /// Because modifiers are also shortcut keys, a trigger only fires when its key is used *alone*:
-/// any key, click, or other modifier while it is held turns the press into a chord and it is
-/// ignored (or cancels a session it already started).
+/// it must go down with no other modifier held, and any key, click, or other modifier while it
+/// is held turns the press into a chord and it is ignored (or cancels a session it already
+/// started).
 ///
 /// Needs Input Monitoring permission; listen-only taps can't block or alter events.
 final class ModifierKeyTrigger {
@@ -177,7 +185,17 @@ final class ModifierKeyTrigger {
                 reset()
             }
             if let key = keys.first(where: { $0.keyCode == code }), downKey == nil || downKey == key {
-                key.isDown(flags: event.flags.rawValue) ? pressed(key) : released(key)
+                let flags = event.flags.rawValue
+                if key.isDown(flags: flags) {
+                    // Only a press from a neutral keyboard counts. With ⇧ (or any other modifier)
+                    // already held it's the start of a shortcut, and a firmware macro like ⇧⌥←
+                    // must not read as a tap that latches hands-free (Hex #1076). The press is
+                    // ignored until the key comes up again.
+                    if downKey == nil, key.othersDown(flags: flags) { return }
+                    pressed(key)
+                } else {
+                    released(key)
+                }
             } else if downKey != nil {
                 chord()
             }
