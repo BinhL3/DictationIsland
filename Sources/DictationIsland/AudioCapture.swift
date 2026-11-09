@@ -31,6 +31,17 @@ final class LevelMeter: @unchecked Sendable {
     }
 }
 
+/// RMS around the mean, so a mic with a constant DC offset (some built-in mics have one) reads as
+/// quiet instead of pinning the meter at the offset (Hex #1559).
+func acRMS(_ samples: UnsafePointer<Float>, _ count: Int) -> Float {
+    guard count > 0 else { return 0 }
+    var mean: Float = 0
+    var meanSquare: Float = 0
+    vDSP_meanv(samples, 1, &mean, vDSP_Length(count))
+    vDSP_measqv(samples, 1, &meanSquare, vDSP_Length(count))
+    return sqrt(max(0, meanSquare - mean * mean))
+}
+
 /// Splits mic audio into log-spaced voice bands (each a start/end frequency range), one per
 /// waveform bar, so the bars move independently instead of all tracking overall loudness.
 final class SpectrumAnalyzer {
@@ -67,8 +78,7 @@ final class SpectrumAnalyzer {
     /// octave and judged mostly against their own recent peak, so every bar moves while talking.
     func levels(samples: UnsafePointer<Float>, count: Int, sampleRate: Double) -> [Float] {
         let n = min(count, fftSize)
-        var rms: Float = 0
-        vDSP_rmsqv(samples, 1, &rms, vDSP_Length(n))
+        let rms = acRMS(samples, n)
         let db = 20 * log10(max(rms, 1e-7))
         let loudness = max(0, min(1, (db + 55) / 40))
 
@@ -173,9 +183,11 @@ final class AudioCapture {
             try buildGraph(deviceUID: deviceUID, channel: channel).engine.start()
         }
         observeConfiguration(deviceUID: deviceUID, channel: channel)
+        watchForStall(deviceUID: deviceUID, channel: channel)
     }
 
     func stop() {
+        stopWatchingForStall()
         stopObserving()
         handler.set(nil)
         graph?.engine.stop()
@@ -212,6 +224,39 @@ final class AudioCapture {
             guard (try? self.buildGraph(deviceUID: deviceUID, channel: channel).engine.start()) != nil else { return }
             self.observeConfiguration(deviceUID: deviceUID, channel: channel)
         }
+    }
+
+    /// A stream can stop delivering audio without an error or a configuration change (after a
+    /// burst of overruns, Hex #1206), so the rest of the take would be silent. If no buffer has
+    /// arrived for a while, rebuild the engine, sharing the rebuild cap with configuration changes.
+    private var stallTimer: Timer?
+    private static let stallTimeout: TimeInterval = 2
+    /// A Bluetooth headset switching to its mic profile can take seconds to send anything.
+    private static let firstBufferTimeout: TimeInterval = 6
+
+    private func watchForStall(deviceUID: String?, channel: InputChannel) {
+        stopWatchingForStall()
+        handler.resetLiveness()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.handler.get() != nil,
+                  self.handler.secondsSinceLastBuffer > (self.handler.hasDelivered ? Self.stallTimeout : Self.firstBufferTimeout),
+                  self.rebuilds < Self.maxRebuilds else { return }
+            self.rebuilds += 1
+            NSLog("DictationIsland: the microphone stopped delivering audio; reopening it")
+            self.stopObserving()
+            self.graph?.engine.stop()
+            self.graph = nil
+            self.handler.resetLiveness()
+            guard (try? self.buildGraph(deviceUID: deviceUID, channel: channel).engine.start()) != nil else { return }
+            self.observeConfiguration(deviceUID: deviceUID, channel: channel)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        stallTimer = timer
+    }
+
+    private func stopWatchingForStall() {
+        stallTimer?.invalidate()
+        stallTimer = nil
     }
 
     private func stopObserving() {
@@ -272,6 +317,7 @@ final class AudioCapture {
         }
 
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [analyzer, meter, handler] buffer, _ in
+            handler.markAlive()
             guard let onBuffer = handler.get(),
                   let monoBuffer = Self.downmix(buffer, to: mono, channel: channel) else { return }
             onBuffer(monoBuffer)
@@ -346,6 +392,37 @@ private final class BufferHandler: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return onBuffer
+    }
+
+    private var lastBuffer = ProcessInfo.processInfo.systemUptime
+    private var delivered = false
+
+    /// Called from the tap for every buffer.
+    func markAlive() {
+        lock.lock()
+        lastBuffer = ProcessInfo.processInfo.systemUptime
+        delivered = true
+        lock.unlock()
+    }
+
+    /// A (re)started engine: wait for its first buffer.
+    func resetLiveness() {
+        lock.lock()
+        lastBuffer = ProcessInfo.processInfo.systemUptime
+        delivered = false
+        lock.unlock()
+    }
+
+    var hasDelivered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return delivered
+    }
+
+    var secondsSinceLastBuffer: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return ProcessInfo.processInfo.systemUptime - lastBuffer
     }
 }
 

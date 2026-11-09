@@ -77,9 +77,13 @@ final class TakeActivity: @unchecked Sendable {
         pending.append(contentsOf: UnsafeBufferPointer(start: data, count: count))
         var start = 0
         while pending.count - start >= frameLength {
+            var peak: Float = 0
             var rms: Float = 0
-            pending.withUnsafeBufferPointer { vDSP_rmsqv($0.baseAddress! + start, 1, &rms, vDSP_Length(frameLength)) }
-            if rms > 0 { heardSignal = true }
+            pending.withUnsafeBufferPointer {
+                vDSP_maxmgv($0.baseAddress! + start, 1, &peak, vDSP_Length(frameLength))
+                rms = acRMS($0.baseAddress! + start, frameLength)
+            }
+            if peak > 0 { heardSignal = true }
             let db = 20 * log10(max(rms, 1e-6))
             histogram[min(120, max(0, Int(db.rounded()) + 120))] += 1
             speech.append(Double(db) > Swift.max(floor() + 12, -58))

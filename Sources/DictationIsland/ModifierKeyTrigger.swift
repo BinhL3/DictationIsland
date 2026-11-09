@@ -153,6 +153,27 @@ final class ModifierKeyTrigger {
         return true
     }
 
+    /// Removes the event tap. Must run before the trigger is freed: the tap's callback holds an
+    /// unretained pointer to it.
+    func stop() {
+        holdWork?.cancel()
+        healthTimer?.invalidate()
+        healthTimer = nil
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+        tap = nil
+        tapSource = nil
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
+    }
+
+    deinit {
+        stop()
+    }
+
     private func checkTapHealth() {
         guard let tap else { return }
         if !CFMachPortIsValid(tap) {

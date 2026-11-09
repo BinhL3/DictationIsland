@@ -82,6 +82,9 @@ final class ShortcutListener {
 
     deinit {
         retry?.invalidate()
+        // The event tap holds an unretained pointer to the trigger; remove it before the trigger
+        // goes, or the next key event calls into freed memory.
+        trigger?.stop()
     }
 }
 
@@ -129,7 +132,8 @@ struct ShortcutRecorder: View {
                 if flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
                 if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
                 // A plain letter would fire while typing; insist on ⌃, ⌥ or ⌘ (F-keys are fine alone).
-                let isFunctionKey = (Int(kVK_F1)...Int(kVK_F12)).contains(Int(event.keyCode)) || [kVK_F13, kVK_F14, kVK_F15].contains(Int(event.keyCode))
+                // F-key codes aren't contiguous (F1 is 122, F12 is 111), so list them.
+                let isFunctionKey = Self.functionKeys.contains(Int(event.keyCode))
                 guard modifiers & UInt32(controlKey | optionKey | cmdKey) != 0 || isFunctionKey else { NSSound.beep(); return nil }
                 shortcut = .combo(keyCode: UInt32(event.keyCode), modifiers: modifiers)
                 stop()
@@ -146,6 +150,11 @@ struct ShortcutRecorder: View {
             return nil
         }
     }
+
+    private static let functionKeys: Set<Int> = [
+        kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10,
+        kVK_F11, kVK_F12, kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20,
+    ]
 
     private func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
