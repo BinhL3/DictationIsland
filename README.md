@@ -18,9 +18,11 @@ the menu bar.
 1. Download `DictationIsland-<version>.dmg` from the
    [latest release](https://github.com/BinhL3/DictationIsland/releases/latest).
 2. Open it and drag **DictationIsland** into **Applications**.
-3. Open it from Applications. The app isn't notarized by Apple, so the first launch is blocked:
-   go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
-   (Or run `xattr -dr com.apple.quarantine /Applications/DictationIsland.app` once.)
+3. Open it from Applications. It's signed with a Developer ID and notarized by Apple, so it opens
+   like any other downloaded app.
+   **Coming from 0.5.1 or earlier?** Those builds were self-signed, so macOS treats 0.5.2 as a
+   new app: the in-app Update button opens the DMG instead of updating in place, and you grant
+   Microphone and Accessibility again, once. Updates are one click again after that.
 4. A short setup walks you through two permissions, **Microphone** and **Accessibility**
    (for the dictation key and pasting), while the speech model downloads, then lets you try a
    dictation. A small guide docks under System Settings showing what to drag where.
@@ -37,9 +39,12 @@ cd DictationIsland
 make install     # build, sign, install to /Applications, launch
 ```
 
-`make install` signs with a self-signed certificate it creates once in its own keychain
-(`scripts/signing.sh`), so macOS keeps your permission grants across rebuilds.
-`make dmg` builds `build/DictationIsland-<version>.dmg`.
+`make install` signs with your Developer ID certificate if the keychain has one, otherwise with a
+self-signed certificate it creates once in its own keychain (`scripts/signing.sh`), so macOS keeps
+your permission grants across rebuilds.
+`make dmg` builds `build/DictationIsland-<version>.dmg`; with a Developer ID it also notarizes the
+app and the DMG and staples both, using the notarytool keychain profile `DictationIsland`
+(see `scripts/dmg.sh`).
 
 ## Using it
 
@@ -78,7 +83,7 @@ make install     # build, sign, install to /Applications, launch
 * **Updates**: once a day the app asks GitHub whether a newer release exists (one request to the
   public releases API; nothing about you is sent). If so, Home shows an **Update** button: the app
   downloads the new version, checks it's signed with the same certificate, swaps itself in and
-  reopens. Settings and permissions carry over, and there's no "Open Anyway" step. (If the app
+  reopens. Settings and permissions carry over. (If the app
   can't replace itself, say it's running from the disk image, the button downloads the DMG
   instead.)
 * Open the app window from the menu bar 〰 icon, or by opening the app again.

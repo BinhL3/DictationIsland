@@ -50,8 +50,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Stable local identity keeps permission grants across rebuilds; fall back to ad-hoc.
-if IDENTITY="$(scripts/signing.sh 2>/dev/null)" && [[ -n "$IDENTITY" ]]; then
+# Developer ID when its certificate is in the keychain: Gatekeeper accepts it once notarized, and
+# permission grants stay tied to the team across rebuilds and updates. Otherwise the local
+# self-signed identity (stable on this Mac only), then ad-hoc. TIMESTAMP=1 (set by dmg.sh) adds
+# Apple's secure timestamp, which notarization needs and which needs the network.
+DEVELOPER_ID="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+if [[ -n "$DEVELOPER_ID" ]]; then
+  [[ "${TIMESTAMP:-0}" == 1 ]] && STAMP=--timestamp || STAMP=--timestamp=none
+  codesign --force --sign "$DEVELOPER_ID" --options runtime $STAMP \
+    --entitlements scripts/DictationIsland.entitlements "$APP"
+  echo "Signed with $DEVELOPER_ID"
+elif IDENTITY="$(scripts/signing.sh 2>/dev/null)" && [[ -n "$IDENTITY" ]]; then
   codesign --force --sign "$IDENTITY" --keychain "$HOME/Library/Keychains/dictationisland-signing.keychain-db" "$APP"
   echo "Signed with DictationIsland Local Signing"
 else
