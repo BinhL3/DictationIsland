@@ -13,7 +13,7 @@ TIMESTAMP=1 scripts/bundle.sh release
 VERSION="$(cat VERSION)"
 APP=build/DictationIsland.app
 PROFILE="${NOTARY_PROFILE:-DictationIsland}"
-DEVELOPER_ID="$(codesign -dv "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p')"
+DEVELOPER_ID="$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p')"
 NOTARIZE="${NOTARIZE:-1}"
 [[ -n "$DEVELOPER_ID" ]] || NOTARIZE=0
 
