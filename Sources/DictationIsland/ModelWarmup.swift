@@ -38,6 +38,16 @@ final class ModelWarmup {
     var message: String? {
         guard let preparing else { return nil }
         let fallback = preparing == .parakeetVietnamese ? "Apple Dictation" : "Apple Speech"
-        return "Getting \(preparing.shortName) ready for this Mac (one time, a few minutes). Dictating with \(fallback) until then."
+        return "Optimizing \(preparing.shortName) for this Mac's Neural Engine, \(Self.setupTime(preparing)) and only once. Dictating with \(fallback) until then."
+    }
+
+    /// How long the one-time compile takes (Bark measured on an M-series Mac); `short` for the island.
+    static func setupTime(_ engine: SpeechEngine, short: Bool = false) -> String {
+        switch (engine == .bark, short) {
+        case (true, false): return "about 4 minutes"
+        case (true, true): return "~4 min"
+        case (false, false): return "a few minutes"
+        case (false, true): return "a few min"
+        }
     }
 }

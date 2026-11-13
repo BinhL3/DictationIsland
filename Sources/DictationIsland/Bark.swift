@@ -1,6 +1,7 @@
 import Accelerate
 import Compression
 import CoreML
+import os
 
 // Underdog Bark 3.0 by Conway Research: Parakeet TDT 0.6B v3 post-trained for English and
 // compressed to a 163 MB download, about as accurate as Parakeet overall and better on meetings.
@@ -41,19 +42,23 @@ enum BarkModel {
 /// Encoder, frontend and decoder, loaded once and kept warm between dictations (the first load
 /// compiles the encoder for the Neural Engine, which takes a while).
 final class BarkModels: SegmentModel, @unchecked Sendable {
-    /// Encoder windows in seconds; each segment uses the smallest that holds it.
-    private static let windows = [8, 15]
     /// 0.25 s of silence before each segment, the setting the published accuracy was measured with.
     private static let leadingSilence = 4_000
+    /// 0.4 s of silence after each piece of a split segment.
+    private static let pieceSilence = 6_400
 
     var maxSegmentSamples: Int { 15 * 16_000 - Self.leadingSilence }
 
-    private let encoders: [Int: MLModel]
+    /// Loaded windows. The 15 s one joins after the first load (see `load`).
+    private let encoders: OSAllocatedUnfairLock<[Int: MLModel]>
     private let frontend: BarkFrontend
     private let decoder: BarkDecoder
 
+    /// The 15 s window has finished compiling, so segments no longer need splitting.
+    var hasLongWindow: Bool { encoders.withLock { $0[15] != nil } }
+
     private init(encoders: [Int: MLModel], frontend: BarkFrontend, decoder: BarkDecoder) {
-        self.encoders = encoders
+        self.encoders = OSAllocatedUnfairLock(initialState: encoders)
         self.frontend = frontend
         self.decoder = decoder
     }
@@ -78,14 +83,10 @@ final class BarkModels: SegmentModel, @unchecked Sendable {
         guard BarkModel.isInstalled else { throw TranscriberError.unavailable }
         let directory = BarkModel.directory
         let compiled = try await compiledEncoder(in: directory)
-        @Sendable func encoder(_ seconds: Int) async throws -> MLModel {
-            let configuration = MLModelConfiguration()
-            configuration.computeUnits = .cpuAndNeuralEngine
-            configuration.functionName = "w\(seconds)"
-            return try await MLModel.load(contentsOf: compiled, configuration: configuration)
-        }
-        async let short = encoder(8)
-        async let long = encoder(15)
+        // A window's first load compiles it for the Neural Engine: about 4 minutes each, one after
+        // the other. Bark is ready once the 8 s window is, and splits longer audio into 8 s pieces
+        // until the 15 s window follows in the background.
+        async let short = encoder(8, compiled)
 
         let weights = try NPZ(contentsOf: directory.appending(path: "decoder.npz"))
         let vocabulary = try JSONDecoder().decode(
@@ -93,7 +94,19 @@ final class BarkModels: SegmentModel, @unchecked Sendable {
         )
         let frontend = BarkFrontend(melFilters: try weights.floats("mel_filters"))
         let decoder = try BarkDecoder(weights: weights, vocabulary: vocabulary)
-        return try await BarkModels(encoders: [8: short, 15: long], frontend: frontend, decoder: decoder)
+        let models = try await BarkModels(encoders: [8: short], frontend: frontend, decoder: decoder)
+        Task.detached(priority: .utility) {
+            guard let long = try? await encoder(15, compiled) else { return }
+            models.encoders.withLock { $0[15] = long }
+        }
+        return models
+    }
+
+    private static func encoder(_ seconds: Int, _ compiled: URL) async throws -> MLModel {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .cpuAndNeuralEngine
+        configuration.functionName = "w\(seconds)"
+        return try await MLModel.load(contentsOf: compiled, configuration: configuration)
     }
 
     /// The encoder ships as a source `.mlpackage`; compile it once and keep the result next to it.
@@ -106,10 +119,28 @@ final class BarkModels: SegmentModel, @unchecked Sendable {
     }
 
     func transcribe(_ samples: ArraySlice<Float>) throws -> String {
+        let loaded = encoders.withLock { $0 }
+        guard let largest = loaded.keys.max() else { throw TranscriberError.unavailable }
+        guard samples.count > largest * 16_000 - Self.leadingSilence else { return try transcribe(samples, loaded) }
+        // Longer than the largest loaded window (only while the 15 s one is still compiling):
+        // decode it in pieces cut at pauses. Each piece gets trailing silence, without which Bark
+        // reads it as mid-sentence and leaves out capitals and punctuation.
+        let limit = largest * 16_000 - Self.leadingSilence - Self.pieceSilence
+        var rest = samples, text = ""
+        while rest.count > limit {
+            let cut = Self.quietestCut(in: rest, before: limit)
+            let piece = Array(rest.prefix(cut)) + [Float](repeating: 0, count: Self.pieceSilence)
+            text = Self.join(text, try transcribe(piece[...], loaded))
+            rest = rest.dropFirst(cut)
+        }
+        return Self.join(text, try transcribe(rest, loaded))
+    }
+
+    private func transcribe(_ samples: ArraySlice<Float>, _ loaded: [Int: MLModel]) throws -> String {
         var audio = [Float](repeating: 0, count: Self.leadingSilence)
         audio.append(contentsOf: samples)
-        guard let seconds = Self.windows.first(where: { audio.count <= $0 * 16_000 }),
-              let encoder = encoders[seconds]
+        guard let seconds = loaded.keys.sorted().first(where: { audio.count <= $0 * 16_000 }),
+              let encoder = loaded[seconds]
         else { throw TranscriberError.unavailable }
 
         let mel = frontend.features(audio)
@@ -132,6 +163,36 @@ final class BarkModels: SegmentModel, @unchecked Sendable {
         let matrix = Self.rows(frames, of: encoded)
         guard matrix.allSatisfy(\.isFinite) else { throw TranscriberError.unavailable }
         return decoder.text(decoder.decode(matrix, frames: frames))
+    }
+
+    /// Where to split audio longer than `limit`: the middle of its quietest 80 ms in the second
+    /// half of the first `limit` samples.
+    private static func quietestCut(in samples: ArraySlice<Float>, before limit: Int) -> Int {
+        let frame = 1_280
+        var best = limit, bestEnergy = Float.greatestFiniteMagnitude
+        var offset = limit / 2
+        let audio = Array(samples.prefix(limit))
+        while offset + frame <= limit {
+            var energy: Float = 0
+            audio.withUnsafeBufferPointer { vDSP_svesq($0.baseAddress! + offset, 1, &energy, vDSP_Length(frame)) }
+            if energy < bestEnergy { bestEnergy = energy; best = offset + frame / 2 }
+            offset += frame / 2
+        }
+        return best
+    }
+
+    /// Pieces of one segment. Bark capitalises a short piece unreliably, so its first word
+    /// follows the piece before: capitalised after a sentence end, lower-case mid-sentence.
+    private static func join(_ head: String, _ tail: String) -> String {
+        guard !head.isEmpty else { return tail }
+        guard !tail.isEmpty, let last = head.last, let first = tail.split(separator: " ").first else { return head + tail }
+        var tail = tail
+        if ".?!…".contains(last) {
+            tail = first.prefix(1).uppercased() + tail.dropFirst()
+        } else if first != "I", !first.hasPrefix("I'"), first.dropFirst().allSatisfy({ !$0.isUppercase }) {
+            tail = first.prefix(1).lowercased() + tail.dropFirst()
+        }
+        return head + " " + tail
     }
 
     /// Frames left after the encoder's three stride-2 convolutions.

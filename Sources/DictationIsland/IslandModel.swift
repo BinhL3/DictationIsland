@@ -431,7 +431,7 @@ final class IslandModel {
                await SpeechModelCatalog.status(of: resolution) == .installed {
                 let chosen = resolution.engine
                 resolution = await SpeechModelCatalog.resolve(.automatic, locale: fallback ?? settings.locale)
-                if current() { notice = "\(chosen.shortName) is getting ready · using \(resolution.engine.shortName)" }
+                if current() { notice = "\(chosen.shortName): one-time setup, \(ModelWarmup.setupTime(chosen, short: true)) · using \(resolution.engine.shortName)" }
             }
             let transcriber = makeTranscriber(for: resolution, take: session)
             guard await transcriber.requestPermission() else {

@@ -231,6 +231,11 @@ struct PlacementScreen: View {
             }
             .frame(width: size.width, height: size.height)
             .contentShape(Rectangle())
+            // One element for assistive apps (and the demo-recording skill, which finds it by id).
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Island position")
+            .accessibilityValue(title(current))
+            .accessibilityIdentifier("placement-screen")
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
@@ -314,7 +319,9 @@ struct PlacementScreen: View {
             Spacer(minLength: (notchSize?.width ?? topGeometry?.closedSize.width ?? 0) + 20)
             Image(systemName: "wifi")
             Image(systemName: "battery.75percent")
-            Text(Date.now, format: .dateTime.weekday(.abbreviated).hour().minute())
+            TimelineView(.everyMinute) { context in
+                Text(context.date, format: .dateTime.weekday(.abbreviated).hour().minute())
+            }
         }
         .font(.system(size: 11.5, weight: .medium))
         .foregroundStyle(.white.opacity(0.88))
