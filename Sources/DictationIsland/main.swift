@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if arguments.contains("--guide-preview") { PermissionGuide.shared.show(for: .accessibility) }
+        Permission.clearEntriesFromOldSignature()
         installPushToTalk(model: island.model)
         updateHotKey(model: island.model)
         updateShortcutListeners(model: island.model)
@@ -217,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.prepare()
         withObservationTracking {
             _ = settings.microphoneUID
-            _ = settings.avoidBluetoothMic
+            _ = settings.preferBuiltInMic
             _ = settings.inputChannel
             _ = settings.speechEngine
             _ = settings.locale

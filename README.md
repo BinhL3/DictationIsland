@@ -95,13 +95,13 @@ app and the DMG and staples both, using the notarytool keychain profile `Dictati
 | **Apple Speech** | Apple's newest on-device model (`SpeechTranscriber`). |
 | **Apple Dictation** | The model behind macOS keyboard dictation (`DictationTranscriber`). |
 | **Underdog Bark 3.0** | Parakeet V3 post-trained for English: as accurate overall, better on conversational speech. One-time ~200 MB download, runs on Core ML. The first load compiles it for the Neural Engine, which takes several minutes. |
-| **NVIDIA Parakeet V3** | 25 European languages, auto-detected. One-time ~630 MB download, runs on Core ML. |
+| **NVIDIA Parakeet V3** | English and 24 more European languages, auto-detected. One-time ~630 MB download, runs on Core ML; the first load compiles it for the Neural Engine in about 30 seconds. |
 | **NVIDIA Parakeet Vietnamese** | Vietnamese, with English words mixed in, punctuated. One-time ~600 MB download (OpenVoiceOS's int8 Core ML export), runs on the Neural Engine. |
 | **Legacy** | `SFSpeechRecognizer`. |
 
 *Automatic* picks the best Apple model for your language (Apple Dictation covers Vietnamese
-too, with nothing to download). Setup recommends a model for your Mac's language (Bark for
-English, Parakeet V3 for other European languages, Parakeet Vietnamese for Vietnamese) and
+too, with nothing to download). Setup recommends a model for your Mac's language (Parakeet V3 for
+English and other European languages, Parakeet Vietnamese for Vietnamese) and
 downloads it in the background while Apple's model fills in.
 
 ### Other settings

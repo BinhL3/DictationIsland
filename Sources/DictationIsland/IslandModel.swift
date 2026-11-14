@@ -400,7 +400,8 @@ final class IslandModel {
         isCapturing = true
         isCaptureRunning = false
         activePartial = ""
-        let laughs = settings.laughEmoji && !simulatesAudio ? LaughDetector() : nil
+        // Skipped while a speech model loads: its classifier wouldn't load until that's done.
+        let laughs = settings.laughEmoji && !simulatesAudio && !ModelWarmup.shared.isLoading ? LaughDetector() : nil
         laughs?.onLaughing = { [weak self] emoji in
             MainActor.assumeIsolated {
                 guard let self, session == self.shownTake, self.phase == .listening else { return }

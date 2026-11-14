@@ -196,9 +196,9 @@ final class AppSettings {
     var inputChannel: InputChannel {
         didSet { defaults.set(inputChannel.rawValue, forKey: Keys.inputChannel) }
     }
-    /// With the system default input, use the built-in mic instead of a Bluetooth headset's.
-    var avoidBluetoothMic: Bool {
-        didSet { defaults.set(avoidBluetoothMic, forKey: Keys.avoidBluetoothMic) }
+    /// With no mic chosen, use the Mac's built-in mic over the system default (a USB mic, a headset).
+    var preferBuiltInMic: Bool {
+        didSet { defaults.set(preferBuiltInMic, forKey: Keys.preferBuiltInMic) }
     }
     /// One rule per line: `heard -> written`, or a bare word to only hint the recognizer.
     var correctionsText: String {
@@ -291,7 +291,7 @@ final class AppSettings {
         muffleLevel = defaults.object(forKey: Keys.muffleLevel) as? Double ?? 0.2
         microphoneUID = defaults.string(forKey: Keys.microphoneUID)
         inputChannel = defaults.string(forKey: Keys.inputChannel).flatMap(InputChannel.init) ?? .mix
-        avoidBluetoothMic = defaults.object(forKey: Keys.avoidBluetoothMic) as? Bool ?? true
+        preferBuiltInMic = defaults.object(forKey: Keys.preferBuiltInMic) as? Bool ?? true
         let correctionsText = defaults.string(forKey: Keys.corrections) ?? ""
         self.correctionsText = correctionsText
         corrections = Corrections(correctionsText)
@@ -350,7 +350,7 @@ final class AppSettings {
 
     /// The mic a take should open right now; see `AudioDevices.preferredInputUID`.
     var resolvedMicrophoneUID: String? {
-        AudioDevices.preferredInputUID(selected: microphoneUID, avoidBluetooth: avoidBluetoothMic)
+        AudioDevices.preferredInputUID(selected: microphoneUID, preferBuiltIn: preferBuiltInMic)
     }
 
     var locale: Locale {
@@ -394,7 +394,8 @@ final class AppSettings {
         static let muffleLevel = "muffleLevel"
         static let microphoneUID = "microphoneUID"
         static let inputChannel = "inputChannel"
-        static let avoidBluetoothMic = "avoidBluetoothMic"
+        /// Was "skip Bluetooth headsets for the built-in mic"; the key is kept so turning it off sticks.
+        static let preferBuiltInMic = "avoidBluetoothMic"
         static let corrections = "correctionRules"
         static let spokenFormatting = "spokenFormatting"
         static let styleRewrite = "styleRewrite"

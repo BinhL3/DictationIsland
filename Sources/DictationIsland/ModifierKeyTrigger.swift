@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+import os
+
+private let triggerLog = Logger(subsystem: "dev.voicedictation.DictationIsland", category: "trigger")
 
 /// A key that can trigger push-to-talk on its own: any modifier (each side separately) or fn.
 /// These keys don't type anything, so a listen-only tap can use them without swallowing input.
@@ -183,6 +186,7 @@ final class ModifierKeyTrigger {
             tapSource = nil
             start()
         } else if !CGEvent.tapIsEnabled(tap: tap) {
+            triggerLog.notice("The key listener was switched off by macOS; turning it back on")
             // Events were missed while it was off, so the held-key state can't be trusted.
             reset()
             CGEvent.tapEnable(tap: tap, enable: true)

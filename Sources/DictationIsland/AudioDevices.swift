@@ -113,22 +113,22 @@ enum AudioDevices {
         inputs().first { $0.uid == uid }
     }
 
-    /// The input to open for a take. A chosen mic wins while it's connected. Otherwise this
-    /// follows the system default (as `AudioCapture` does for a missing mic), except that a Bluetooth headset (AirPods) is passed over for the built-in mic:
-    /// opening a headset's mic drops it into low-quality call audio, which hurts both the
-    /// recording and the music being muffled. With the lid closed the built-in mic can't hear
-    /// you, so the headset is used after all. nil means "system default".
-    static func preferredInputUID(selected: String?, avoidBluetooth: Bool) -> String? {
+    /// The input to open for a take. A chosen mic wins while it's connected. Otherwise, with
+    /// `preferBuiltIn`, the Mac's own mic is used whenever it can hear you: it's always there and
+    /// always working, unlike a USB mic that's muted, unplugged-and-replugged or set as the default
+    /// by another app, and a Bluetooth headset's mic drops it into low-quality call audio. With the
+    /// lid closed (or on a Mac without a built-in mic) this follows the system default, as
+    /// `AudioCapture` also does for a missing mic. nil means "system default".
+    static func preferredInputUID(selected: String?, preferBuiltIn: Bool) -> String? {
         if let selected, device(uid: selected) != nil { return selected }
-        guard avoidBluetooth, let current = defaultInput(), isBluetooth(current.id), !isLidClosed(),
-              let builtIn = visibleInputs().first(where: { transportType($0.id) == kAudioDeviceTransportTypeBuiltIn })
-        else { return selected }
+        guard preferBuiltIn, let builtIn = builtInInput() else { return selected }
         return builtIn.uid
     }
 
-    static func isBluetooth(_ id: AudioDeviceID) -> Bool {
-        let transport = transportType(id)
-        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    /// The Mac's own mic, when the lid is open.
+    static func builtInInput() -> AudioInputDevice? {
+        guard !isLidClosed() else { return nil }
+        return visibleInputs().first { transportType($0.id) == kAudioDeviceTransportTypeBuiltIn }
     }
 
     private static func transportType(_ id: AudioDeviceID) -> UInt32 {

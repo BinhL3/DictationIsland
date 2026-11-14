@@ -9,7 +9,7 @@ final class ModelChoice {
     static let shared = ModelChoice()
 
     enum Option: String, CaseIterable, Identifiable {
-        case bark, parakeet, vietnamese, apple
+        case parakeet, bark, vietnamese, apple
 
         var id: String { rawValue }
 
@@ -33,8 +33,8 @@ final class ModelChoice {
 
         var summary: String {
             switch self {
-            case .bark: return "The most accurate for English."
-            case .parakeet: return "25 European languages, detected as you speak."
+            case .bark: return "The most accurate for English. First setup takes a few minutes."
+            case .parakeet: return "Fast to set up. English and 24 more European languages, detected as you speak."
             case .vietnamese: return "Vietnamese, with English words mixed in."
             case .apple: return "Built into macOS, in many languages."
             }
@@ -61,16 +61,16 @@ final class ModelChoice {
             }
         }
 
-        /// Bark for English, Parakeet for the other languages it covers, otherwise Apple's.
+        /// Parakeet for the languages it covers (English included: it's ready in about 30 seconds,
+        /// where Bark's first setup takes minutes), Vietnamese's own model, otherwise Apple's.
         static func recommended(for locale: Locale) -> Option {
             let language = locale.language.languageCode?.identifier ?? "en"
-            if language == "en" { return .bark }
             if language == "vi" { return .vietnamese }
             return parakeetLanguages.contains(language) ? .parakeet : .apple
         }
 
         static let parakeetLanguages: Set<String> = [
-            "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
+            "en", "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
             "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
         ]
     }

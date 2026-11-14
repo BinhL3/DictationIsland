@@ -52,6 +52,11 @@ final class SpectrumAnalyzer {
     private let bands: [(start: Float, end: Float)]
     /// Each band's recent peak energy, decaying between buffers. Audio thread only.
     private var bandPeaks: [Float]
+    /// The room's noise level and the speaker's recent loudness, in dBFS, so the bars fill the
+    /// same way on a quiet built-in mic (input volume turned down) as on a hot USB one. Kept
+    /// across takes. Audio thread only.
+    private var noiseFloor: Float = -60
+    private var voicePeak: Float = -35
 
     init(bandCount: Int, fftSize: Int = 1024, minFrequency: Float = 120, maxFrequency: Float = 6_000) {
         self.fftSize = fftSize
@@ -80,7 +85,15 @@ final class SpectrumAnalyzer {
         let n = min(count, fftSize)
         let rms = acRMS(samples, n)
         let db = 20 * log10(max(rms, 1e-7))
-        let loudness = max(0, min(1, (db + 55) / 40))
+        // The floor follows quiet stretches (pauses between words) down quickly and creeps up
+        // ~1 dB/s; the peak jumps to loud buffers and relaxes ~1 dB/s. At least 18 dB apart, so
+        // background noise never fills the bars. Measured on a built-in mic at 33% input volume:
+        // speech at -42...-34 dBFS over a -68 floor used to sit at a median 11% bar height.
+        noiseFloor = db < noiseFloor ? noiseFloor + (db - noiseFloor) * 0.3 : noiseFloor + 0.02
+        noiseFloor = min(max(noiseFloor, -80), -30)
+        voicePeak = max(db > voicePeak ? db : voicePeak - 0.02, noiseFloor + 18)
+        let gate = noiseFloor + 6
+        let loudness = pow(max(0, min(1, (db - gate) / (voicePeak - gate))), 0.6)
 
         var windowed = [Float](repeating: 0, count: fftSize)
         vDSP_vmul(samples, 1, window, 1, &windowed, 1, vDSP_Length(n))

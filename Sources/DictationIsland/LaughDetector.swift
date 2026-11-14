@@ -54,16 +54,26 @@ final class LaughDetector: NSObject, SNResultsObserving, @unchecked Sendable {
         }
     }
 
-    /// The laughs heard in this take, once the remaining audio is analysed.
+    /// The laughs heard in this take, once the remaining audio is analysed. Gives up (no laughs)
+    /// after `finishDeadline`: the classifier's model can be stuck loading behind a speech model's
+    /// first Core ML load for minutes, and an emoji must never hold up the paste.
     func finish() async -> [Laugh] {
-        await withCheckedContinuation { continuation in
-            queue.async { [self] in
-                analyzer?.completeAnalysis()
-                analyzer = nil
-                continuation.resume(returning: laughs)
+        final class Found: @unchecked Sendable { var laughs: [Laugh] = [] }
+        let found = Found()
+        let finished = await withDeadline(Self.finishDeadline) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                self.queue.async { [self] in
+                    analyzer?.completeAnalysis()
+                    analyzer = nil
+                    found.laughs = laughs
+                    continuation.resume()
+                }
             }
         }
+        return finished ? found.laughs : []
     }
+
+    private static let finishDeadline: Duration = .seconds(2)
 
     func request(_ request: SNRequest, didProduce result: SNResult) {
         guard let result = result as? SNClassificationResult else { return }

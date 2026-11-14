@@ -131,6 +131,8 @@ enum Permission: String, CaseIterable, Identifiable {
         case .accessibility: service = "Accessibility"
         case .inputMonitoring: service = "ListenEvent"
         case .microphone: service = "Microphone"
+        case .screenRecording: service = "ScreenCapture"
+        case .systemAudio: service = "AudioCapture"
         default: return
         }
         let process = Process()
@@ -138,6 +140,23 @@ enum Permission: String, CaseIterable, Identifiable {
         process.arguments = ["reset", service, Bundle.main.bundleIdentifier ?? "dev.voicedictation.DictationIsland"]
         try? process.run()
         process.waitUntilExit()
+    }
+
+    /// Once: clears permission entries that don't work for this build.
+    /// 0.5.1 and earlier were signed with a local certificate, 0.5.2 with a Developer ID, and
+    /// macOS keeps the old entries (the switches still look on) but rejects them. A rejected
+    /// Input Monitoring entry makes macOS keep switching the key listener off, which cut every
+    /// hold short. Neither is cleared while it works; Input Monitoring isn't needed (Accessibility
+    /// covers the key listener), so a cleared one only means macOS may ask again.
+    static func clearEntriesFromOldSignature() {
+        let key = "clearedEntriesFromOldSignature2"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        if !CGPreflightListenEventAccess() { Permission.inputMonitoring.resetEntry() }
+        if !AXIsProcessTrusted() { Permission.accessibility.resetEntry() }
+        // Optional ones too: their switches look on in System Settings while the app says no.
+        if !CGPreflightScreenCaptureAccess() { Permission.screenRecording.resetEntry() }
+        if SystemAudioPermission.status != .authorized { Permission.systemAudio.resetEntry() }
     }
 
     func openSettings() {

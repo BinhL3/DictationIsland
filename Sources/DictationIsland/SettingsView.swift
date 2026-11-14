@@ -662,13 +662,14 @@ struct MicrophoneSettings: View {
     @Bindable private var settings = AppSettings.shared
     @State private var devices: [AudioInputDevice] = []
     @State private var defaultDevice: AudioInputDevice?
+    @State private var builtInDevice: AudioInputDevice?
     @State private var tester = MicrophoneTester()
 
     var body: some View {
         Form {
             Section("Input") {
                 Picker("Microphone", selection: $settings.microphoneUID) {
-                    Text("System default (\(defaultDevice?.name ?? "none"))").tag(String?.none)
+                    Text("Automatic (\(automaticDevice?.name ?? "none"))").tag(String?.none)
                     ForEach(devices) { device in
                         Text("\(device.name)  ·  \(device.channelCount) ch\(device.isHidden ? "  ·  hidden by a driver" : "")")
                             .tag(Optional(device.uid))
@@ -677,13 +678,13 @@ struct MicrophoneSettings: View {
                         Text("Disconnected device").tag(Optional(uid))
                     }
                 }
-                Toggle("Use the built-in mic instead of Bluetooth headsets", isOn: $settings.avoidBluetoothMic)
+                Toggle("Prefer the Mac's built-in mic", isOn: $settings.preferBuiltInMic)
                     .disabled(devices.contains { $0.uid == settings.microphoneUID })
                 Picker("Channel", selection: $settings.inputChannel) {
                     ForEach(InputChannel.allCases) { Text($0.title).tag($0) }
                 }
                 .disabled(selectedChannelCount < 2)
-                Text("On the system default (or when your chosen mic is unplugged), AirPods and other headsets are skipped for the built-in mic: using a headset's mic switches it to low-quality call audio. The headset is still used when the lid is closed. Stereo mics like the Blue Yeti have two channels; use “Mix” unless only one side carries your voice.")
+                Text("On Automatic (or when your chosen mic is unplugged), dictation uses the Mac's own mic while the lid is open, even if a USB mic or headset is the system default: it's always connected, and using a headset's mic switches it to low-quality call audio. With the lid closed, or with this off, it follows the system default. To always use a USB mic, pick it above. Stereo mics like the Blue Yeti have two channels; use “Mix” unless only one side carries your voice.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -725,12 +726,18 @@ struct MicrophoneSettings: View {
 
     private var selectedChannelCount: Int {
         if let uid = settings.microphoneUID { return devices.first { $0.uid == uid }?.channelCount ?? 1 }
-        return defaultDevice?.channelCount ?? 1
+        return automaticDevice?.channelCount ?? 1
+    }
+
+    /// What Automatic opens right now.
+    private var automaticDevice: AudioInputDevice? {
+        settings.preferBuiltInMic ? builtInDevice ?? defaultDevice : defaultDevice
     }
 
     private func refresh() {
         devices = AudioDevices.inputs()
         defaultDevice = AudioDevices.defaultInput()
+        builtInDevice = AudioDevices.builtInInput()
     }
 }
 
@@ -845,6 +852,12 @@ private struct PermissionRow: View {
             }
             Spacer()
             if !permission.isGranted {
+                // macOS applies a Screen Recording grant only to a fresh launch, so the row
+                // can't turn green until the app reopens.
+                if permission == .screenRecording {
+                    Button("Quit & Reopen") { UpdateInstaller.relaunch() }
+                        .help("Turned it on in System Settings? Screen Recording takes effect after DictationIsland reopens.")
+                }
                 Button("Grant…") { permission.request() }
             }
         }
