@@ -11,6 +11,8 @@ enum Shortcut: Codable, Hashable {
 
     static let annotateDefault = Shortcut.combo(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(controlKey | optionKey))
     static let fixDefault = Shortcut.modifier(TriggerKey.rightCommand.keyCode)
+    /// Hex's default too.
+    static let pasteLastDefault = Shortcut.combo(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(optionKey | shiftKey))
 
     var display: String {
         switch self {

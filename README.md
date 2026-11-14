@@ -49,10 +49,13 @@ app and the DMG and staples both, using the notarytool keychain profile `Dictati
 ## Using it
 
 * **Hold to talk.** Hold a push-to-talk key, speak, release. The text is pasted into the focused
-  app and also left on the clipboard. **Tap** the key instead for hands-free mode; tap again to
-  finish. Defaults to **fn** and **right ⌥**; add or change keys in Settings → Shortcuts & Island.
-  *How the key works* switches between hold or tap, hold only, and press once to start and again
-  to stop. Using the key in a shortcut (like right ⌘C) doesn't start a dictation.
+  app, and the clipboard goes back to what you had copied (Settings → Shortcuts & Island →
+  *Keep dictations on the clipboard* to leave it there). **Tap** the key instead for hands-free
+  mode; tap again to finish. Defaults to **fn** and **right ⌥**; add or change keys in Settings →
+  Shortcuts & Island. *How the key works* switches between hold or tap, hold only (a double-tap
+  still goes hands-free), and press once to start and again to stop. Using the key in a shortcut
+  (like right ⌘C) doesn't start a dictation.
+* **Paste last**: **⌥⇧V** pastes the latest dictation again, for when it landed in the wrong place.
   If you use fn, set System Settings → Keyboard → "Press 🌐 key to" → *Do Nothing*.
 * **Hover** the island while dictating to see the whole transcript, with Cancel and Done.
 * **Live edits** (experimental, on by default): as the recognizer revises itself or the clean-up

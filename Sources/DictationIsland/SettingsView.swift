@@ -50,6 +50,9 @@ struct GeneralSettings: View {
                 LabeledContent("Fix last dictation") {
                     ShortcutRecorder(shortcut: $settings.fixShortcut)
                 }
+                LabeledContent("Paste last dictation") {
+                    ShortcutRecorder(shortcut: $settings.pasteLastShortcut)
+                }
                 LabeledContent("Annotate screen") {
                     ShortcutRecorder(shortcut: $settings.annotateShortcut)
                 }
@@ -60,7 +63,7 @@ struct GeneralSettings: View {
             } header: {
                 Text("More shortcuts")
             } footer: {
-                Text("Click a shortcut, then press a key on its own (like right ⌘, used by tapping it) or a combination (like ⌃⌥A). **Fix last dictation** rewrites what you just dictated with Apple Intelligence and swaps it in place; if you've typed since, the fixed version is copied instead. **Include computer audio**: tap it while dictating and what your Mac is playing (a video, a call) is transcribed along with you; a speaker shows on the island. Tap again to stop. Needs System Audio Recording permission the first time.")
+                Text("Click a shortcut, then press a key on its own (like right ⌘, used by tapping it) or a combination (like ⌃⌥A). **Fix last dictation** rewrites what you just dictated with Apple Intelligence and swaps it in place; if you've typed since, the fixed version is copied instead. **Paste last dictation** pastes it again, for when it landed in the wrong place. **Include computer audio**: tap it while dictating and what your Mac is playing (a video, a call) is transcribed along with you; a speaker shows on the island. Tap again to stop. Needs System Audio Recording permission the first time.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -86,7 +89,9 @@ struct GeneralSettings: View {
 
             Section("Output") {
                 Toggle("Paste into the active app", isOn: $settings.autoPaste)
-                Text("Text is always copied to the clipboard. Pasting needs Accessibility permission.")
+                Toggle("Keep dictations on the clipboard", isOn: $settings.keepOnClipboard)
+                    .disabled(!settings.autoPaste)
+                Text("After pasting, the clipboard goes back to what you had copied. When a dictation can't be pasted, it's left on the clipboard. Pasting needs Accessibility permission.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -142,7 +147,7 @@ struct GeneralSettings: View {
     private var talkModeNote: String {
         switch settings.talkMode {
         case .holdOrTap: return "**Hold or tap**: hold to talk and release to finish, or tap once for hands-free and tap again to finish."
-        case .hold: return "**Hold to talk**: it only listens while the key is held; a quick tap does nothing."
+        case .hold: return "**Hold to talk**: it listens while the key is held. Double-tap it for hands-free and tap again to finish; a single tap does nothing."
         case .toggle: return "**Press to start and stop**: press once and it keeps listening, however long you talk, until you press again."
         }
     }

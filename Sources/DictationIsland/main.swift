@@ -10,6 +10,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: HotKey?
     private var annotateListener: ShortcutListener?
     private var fixListener: ShortcutListener?
+    private var pasteLastListener: ShortcutListener?
+    /// When the last lone tap of the push-to-talk key ended: a second one soon after locks
+    /// hands-free in Hold to talk.
+    private var lastTapAt: Date?
+    private static let doubleTapWindow: TimeInterval = 0.45
     private var computerAudioListener: ShortcutListener?
     private lazy var pushToTalk = ModifierKeyTrigger(keys: Set(settings.pushToTalkKeys))
     private var pushToTalkRetry: Timer?
@@ -163,9 +168,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.settings.talkMode == .hold {
-                    // Hold only: a tap starts nothing, but still ends a session started another
-                    // way (the menu, a click on the island).
-                    if model.phase == .listening, !model.isArmed { model.stop() } else { model.disarm() }
+                    // A tap still ends a session started another way (a double-tap, the menu, a
+                    // click on the island). One tap alone starts nothing, so a stray tap can't
+                    // leave the mic on; two in a row lock hands-free, as in Hex.
+                    if model.phase == .listening, !model.isArmed {
+                        model.stop()
+                    } else if let last = self.lastTapAt, Date().timeIntervalSince(last) < Self.doubleTapWindow {
+                        self.lastTapAt = nil
+                        model.start()
+                    } else {
+                        self.lastTapAt = Date()
+                        model.disarm()
+                    }
                 } else {
                     model.toggle()
                 }
@@ -236,6 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = settings.annotateEnabled
             _ = settings.annotateShortcut
             _ = settings.fixShortcut
+            _ = settings.pasteLastShortcut
             _ = settings.computerAudioShortcut
         } onChange: { [weak self] in
             DispatchQueue.main.async {
@@ -307,6 +322,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pushToTalk.passThroughKeys = [TriggerKey(keyCode: code)]
         } else {
             pushToTalk.passThroughKeys = []
+        }
+        let pasteLast = settings.pasteLastShortcut
+        if pasteLastListener?.shortcut != pasteLast {
+            pasteLastListener = nil
+            pasteLastListener = pasteLast.flatMap { ShortcutListener($0, id: 5) { model.pasteLast() } }
+            if pasteLast != nil, pasteLastListener == nil { NSLog("DictationIsland: the Paste last shortcut is taken by another app.") }
         }
         let fix = settings.fixShortcut
         if fixListener?.shortcut != fix {

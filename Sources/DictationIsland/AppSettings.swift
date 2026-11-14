@@ -93,7 +93,7 @@ enum TalkMode: String, CaseIterable, Identifiable {
     func howTo(_ key: String) -> String {
         switch self {
         case .holdOrTap: return "Hold \(key) to talk, or tap it once for hands-free and tap again to finish."
-        case .hold: return "Hold \(key) to talk and let go to finish."
+        case .hold: return "Hold \(key) to talk and let go to finish, or double-tap it for hands-free and tap again to finish."
         case .toggle: return "Press \(key) once to start and again to finish. Talk as long as you like."
         }
     }
@@ -224,6 +224,14 @@ final class AppSettings {
             if case .modifier(let code)? = fixShortcut { pushToTalkKeys.removeAll { $0.keyCode == code } }
         }
     }
+    /// Pastes the latest dictation again (it went to the wrong place, or you want it twice).
+    var pasteLastShortcut: Shortcut? {
+        didSet { defaults.set(try? JSONEncoder().encode(pasteLastShortcut), forKey: Keys.pasteLastShortcut) }
+    }
+    /// Leaves a pasted dictation on the clipboard instead of putting back what was there.
+    var keepOnClipboard: Bool {
+        didSet { defaults.set(keepOnClipboard, forKey: Keys.keepOnClipboard) }
+    }
     /// Tapped during a dictation, adds what the Mac is playing to it. Default: left ⇧.
     var computerAudioShortcut: Shortcut? {
         didSet { defaults.set(try? JSONEncoder().encode(computerAudioShortcut), forKey: Keys.computerAudioShortcut) }
@@ -303,6 +311,8 @@ final class AppSettings {
         annotateShortcut = defaults.data(forKey: Keys.annotateShortcut).map { try? JSONDecoder().decode(Shortcut?.self, from: $0) } ?? Shortcut.annotateDefault
         computerAudioShortcut = defaults.data(forKey: Keys.computerAudioShortcut).map { try? JSONDecoder().decode(Shortcut?.self, from: $0) } ?? Shortcut.modifier(56)
         fixShortcut = defaults.data(forKey: Keys.fixShortcut).flatMap { try? JSONDecoder().decode(Shortcut?.self, from: $0) } ?? nil
+        pasteLastShortcut = defaults.data(forKey: Keys.pasteLastShortcut).map { try? JSONDecoder().decode(Shortcut?.self, from: $0) } ?? Shortcut.pasteLastDefault
+        keepOnClipboard = defaults.bool(forKey: Keys.keepOnClipboard)
         styleInstructions = defaults.string(forKey: Keys.styleInstructions) ?? ""
         localeIdentifier = defaults.string(forKey: Keys.locale)
         speechEngine = defaults.string(forKey: Keys.speechEngine).flatMap(SpeechEngine.init) ?? .automatic
@@ -403,6 +413,8 @@ final class AppSettings {
         static let annotateEnabled = "annotateEnabled"
         static let laughEmoji = "laughEmoji"
         static let fixShortcut = "fixShortcut"
+        static let pasteLastShortcut = "pasteLastShortcut"
+        static let keepOnClipboard = "keepOnClipboard"
         static let annotateShortcut = "annotateShortcut"
         static let computerAudioShortcut = "computerAudioShortcut"
         static let styleInstructions = "styleInstructions"

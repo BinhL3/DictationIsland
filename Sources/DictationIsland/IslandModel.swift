@@ -639,6 +639,19 @@ final class IslandModel {
         withAnimation(Motion.content) { hearsComputer = true }
     }
 
+    // MARK: Paste last
+
+    /// Pastes the latest dictation again (as last fixed), for when it landed in the wrong place.
+    func pasteLast() {
+        switch phase {
+        case .idle, .done, .error: break
+        default: return
+        }
+        guard let text = settings.history.first?.text else { return fail("Nothing to paste yet") }
+        let result = TextInserter.insert(text, autoPaste: settings.autoPaste)
+        if result != .empty { SoundCues.play(.done) }
+    }
+
     // MARK: Fix that
 
     /// Fixes the last dictation. First it listens again: the same audio through a *different*
