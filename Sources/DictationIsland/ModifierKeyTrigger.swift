@@ -59,7 +59,7 @@ struct TriggerKey: Codable, Hashable, Identifiable {
 ///
 /// Because modifiers are also shortcut keys, a trigger only fires when its key is used *alone*:
 /// it must go down with no other modifier held, and any key, click, or other modifier while it
-/// is held turns the press into a chord and it is ignored (or cancels a session it already
+/// is held (not a scroll) turns the press into a chord and it is ignored (or cancels a session it already
 /// started).
 ///
 /// Needs Input Monitoring permission; listen-only taps can't block or alter events.
@@ -122,7 +122,9 @@ final class ModifierKeyTrigger {
     @discardableResult
     func start() -> Bool {
         guard tap == nil else { return true }
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        // Scrolling isn't listened to: it's never part of a shortcut, and scrolling mid-dictation
+        // (reading back up a page) mustn't cancel the take.
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         let mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             if let userInfo {
@@ -225,7 +227,7 @@ final class ModifierKeyTrigger {
                 chord()
             }
         default:
-            if type != .scrollWheel { onUserInput?() }
+            onUserInput?()
             if downKey != nil { chord() }
         }
     }
